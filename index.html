@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferme de Claude</title>
+<style>
+  :root { --fond:#fafaf9; --carte:#fff; --texte:#1c1917; --doux:#78716c; --bord:#e7e5e4; --accent:#c2410c; --ok:#15803d; --err:#b91c1c; }
+  @media (prefers-color-scheme: dark) { :root { --fond:#1c1917; --carte:#231f1d; --texte:#f5f5f4; --doux:#a8a29e; --bord:#44403c; --accent:#fb923c; --ok:#4ade80; --err:#f87171; } }
+  body { background:var(--fond); color:var(--texte); font:15px/1.55 system-ui,sans-serif; max-width:620px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:20px; margin:0 0 4px; } .sous { color:var(--doux); margin:0 0 24px; }
+  .carte { background:var(--carte); border:1px solid var(--bord); border-radius:12px; padding:20px; margin-bottom:16px; }
+  .carte[hidden] { display:none; }
+  h2 { font-size:16px; margin:0 0 8px; } p { margin:0 0 12px; }
+  ol { margin:0 0 12px; padding-left:20px; } li { margin-bottom:6px; }
+  input, textarea, select { width:100%; box-sizing:border-box; padding:10px; border:1px solid var(--bord); border-radius:8px; background:transparent; color:inherit; font:inherit; }
+  button { padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; margin-top:10px; }
+  button.lien { background:none; color:var(--doux); font-weight:400; padding:0; text-decoration:underline; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:99px; font-size:13px; font-weight:600; border:1px solid currentColor; }
+  .badge.ok { color:var(--ok); } .badge.non { color:var(--doux); }
+  .erreur { color:var(--err); font-size:14px; min-height:1em; }
+  pre { white-space:pre-wrap; word-break:break-word; font-size:12.5px; background:rgba(127,127,127,.08); padding:10px; border-radius:8px; max-height:320px; overflow:auto; }
+  .reponse { font-size:16px; padding:12px; border-left:3px solid var(--accent); background:rgba(127,127,127,.06); border-radius:4px; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:14px; margin:12px 0 0; } dt { color:var(--doux); } dd { margin:0; }
+  a { color:var(--accent); }
+  details { color:var(--doux); font-size:13px; margin-top:24px; } summary { cursor:pointer; }
+  details label { display:block; margin:10px 0 4px; }
+</style>
+</head>
+<body>
+<h1>Ferme de Claude</h1>
+<p class="sous">Brancher son abonnement Claude, puis laisser un agent tourner dessus sans surveillance.</p>
+
+<div class="carte" id="e-reglages" hidden>
+  <h2>Réglage unique</h2>
+  <p>Colle le jeton de l'agent (donné dans le terminal). Il reste mémorisé dans ce navigateur.</p>
+  <input id="jeton" type="password" placeholder="jeton de l'agent">
+  <button onclick="enregistrerJeton()">Continuer</button>
+</div>
+
+<div class="carte" id="e-connecter" hidden>
+  <h2>Connecter ton abonnement Claude</h2>
+  <p>Ton espace est prêt, mais pas encore relié à ton compte Claude.</p>
+  <button onclick="connecter()">Connecter mon abonnement Claude</button>
+</div>
+
+<div class="carte" id="e-code" hidden>
+  <h2>Finir la connexion chez Anthropic</h2>
+  <ol>
+    <li>Un onglet claude.com vient de s'ouvrir (sinon : <a id="lien" target="_blank" rel="noopener">l'ouvrir</a>).</li>
+    <li>Connecte-toi et clique sur <b>Autoriser</b>.</li>
+    <li>Anthropic affiche un <b>code</b> : copie-le et colle-le ci-dessous.</li>
+  </ol>
+  <input id="code" placeholder="colle le code ici" autocomplete="off">
+  <button onclick="validerCode()">Valider</button>
+  <button class="lien" onclick="afficher('e-connecter')">Recommencer</button>
+</div>
+
+<div class="carte" id="e-pret" hidden>
+  <h2>Abonnement connecté <span class="badge ok" id="compte"></span></h2>
+  <p>Donne une consigne : elle tourne sur le serveur, sur ton abonnement, sans toi.</p>
+  <textarea id="prompt" rows="3">Réponds en une phrase : quel jour sommes-nous, et sur quel modèle tournes-tu ?</textarea>
+  <select id="modele" style="margin-top:8px"><option>sonnet</option><option>haiku</option><option>opus</option></select>
+  <button onclick="lancer()">Lancer</button>
+  <div id="resultat"></div>
+</div>
+
+<p class="erreur" id="erreur"></p>
+
+<details>
+  <summary>Technique</summary>
+  <label>Identifiant du bac</label><input id="slug" value="alexis" onchange="demarrer()">
+  <button class="lien" onclick="demarrer()">Relire l'état</button> ·
+  <button class="lien" onclick="detruire()">Déconnecter et détruire le bac</button> ·
+  <button class="lien" onclick="oublierJeton()">Changer de jeton</button>
+  <pre id="brut"></pre>
+</details>
+
+<script>
+const $ = id => document.getElementById(id);
+const ETAPES = ['e-reglages', 'e-connecter', 'e-code', 'e-pret'];
+let jeton = '';
+try { jeton = localStorage.getItem('ferme-jeton') || ''; } catch (e) {}
+
+function afficher(id) { ETAPES.forEach(e => $(e).hidden = e !== id); $('erreur').textContent = ''; }
+function brut(d) { $('brut').textContent = JSON.stringify(d, null, 2); }
+
+async function appel(methode, sous, corps) {
+  document.querySelectorAll('button').forEach(b => b.disabled = true);
+  $('erreur').textContent = '';
+  try {
+    const r = await fetch(`/api/bacs/${encodeURIComponent($('slug').value.trim())}${sous}`, {
+      method: methode,
+      headers: { 'Authorization': `Bearer ${jeton}`, 'Content-Type': 'application/json' },
+      body: corps ? JSON.stringify(corps) : undefined,
+    });
+    const d = await r.json();
+    brut(d);
+    if (!r.ok) throw Object.assign(new Error(d.erreur), { statut: r.status });
+    return d;
+  } finally {
+    document.querySelectorAll('button').forEach(b => b.disabled = false);
+  }
+}
+function echec(e) { $('erreur').textContent = e.message; }
+
+async function demarrer() {
+  if (!jeton) return afficher('e-reglages');
+  try {
+    const d = await appel('GET', '');
+    if (d.loggedIn) {
+      $('compte').textContent = [d.email, d.subscriptionType].filter(Boolean).join(' · ') || 'connecté';
+      afficher('e-pret');
+    } else afficher('e-connecter');
+  } catch (e) {
+    if (e.statut === 401) { oublierJeton(); return echec(new Error('Jeton refusé.')); }
+    if (e.statut === 404) return afficher('e-connecter');
+    echec(e);
+  }
+}
+function enregistrerJeton() {
+  jeton = $('jeton').value.trim();
+  try { localStorage.setItem('ferme-jeton', jeton); } catch (e) {}
+  demarrer();
+}
+function oublierJeton() {
+  jeton = '';
+  try { localStorage.removeItem('ferme-jeton'); } catch (e) {}
+  afficher('e-reglages');
+}
+async function connecter() {
+  try {
+    await appel('PUT', '');   // crée le bac s'il n'existe pas
+    const d = await appel('POST', '/login', {});
+    $('lien').href = d.url;
+    $('code').value = '';
+    afficher('e-code');
+    window.open(d.url, '_blank', 'noopener');
+  } catch (e) { echec(e); }
+}
+async function validerCode() {
+  try { await appel('PUT', '/login/code', { code: $('code').value.trim() }); demarrer(); }
+  catch (e) { echec(e); }
+}
+async function lancer() {
+  $('resultat').innerHTML = '<p style="margin-top:12px;color:var(--doux)">Claude travaille sur le serveur…</p>';
+  try {
+    const d = await appel('POST', '/runs', { prompt: $('prompt').value, model: $('modele').value });
+    const f = d.forfait || {}, w = f.unifiedWindows || {};
+    const pct = x => x && x.utilization != null ? `${Math.round(x.utilization * 100)} %` : '—';
+    $('resultat').innerHTML = '';
+    const rep = Object.assign(document.createElement('div'), { className: 'reponse', textContent: d.resultat });
+    const dl = document.createElement('dl');
+    [['Payé par', d.apiKeySource === 'none' ? 'ton abonnement (aucune clé d\'API)' : d.apiKeySource],
+     ['Modèle', d.modele], ['Durée', `${d.duree_s} s`],
+     ['Forfait 5 h', pct(w.five_hour)], ['Forfait 7 j', pct(w.seven_day)]]
+      .forEach(([k, v]) => dl.append(Object.assign(document.createElement('dt'), { textContent: k }),
+                                      Object.assign(document.createElement('dd'), { textContent: v })));
+    $('resultat').append(Object.assign(document.createElement('div'), { style: 'margin-top:12px' }), rep, dl);
+  } catch (e) { $('resultat').innerHTML = ''; echec(e); }
+}
+async function detruire() {
+  if (!confirm('Déconnecter ton abonnement et détruire ce bac ?')) return;
+  try { await appel('DELETE', ''); demarrer(); } catch (e) { echec(e); }
+}
+demarrer();
+</script>
+</body>
+</html>

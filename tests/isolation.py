@@ -1,0 +1,12 @@
+"""Lance isolation.js dans un bac avec exactement les brides de l'agent."""
+import os, subprocess, sys
+os.environ.setdefault("FERME_TOKEN", "x")
+sys.path.insert(0, "/opt/ferme")
+import agent
+slug = sys.argv[1]
+cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect",
+       f"--uid=bac-{slug}", f"--gid=bac-{slug}", "-p", f"ReadWritePaths={agent.home(slug)}",
+       "-E", f"HOME={agent.home(slug)}"]
+for b in agent.BRIDES:
+    cmd += ["-p", b]
+subprocess.run(cmd + ["/usr/bin/node", "/opt/ferme/isolation.js"], timeout=60)

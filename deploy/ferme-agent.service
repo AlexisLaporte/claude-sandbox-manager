@@ -1,0 +1,10 @@
+[Unit]
+Description=Ferme de Claude — agent de box (POC, 127.0.0.1:8190)
+After=network-online.target
+[Service]
+EnvironmentFile=/etc/ferme/agent.env
+ExecStart=/usr/bin/python3 /opt/ferme/agent.py
+Restart=on-failure
+MemoryMax=150M
+[Install]
+WantedBy=multi-user.target
