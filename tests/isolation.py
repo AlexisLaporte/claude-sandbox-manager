@@ -2,6 +2,7 @@
 import os, subprocess, sys
 os.environ.setdefault("FERME_TOKEN", "x")
 os.environ.setdefault("FERME_HOST", "127.0.0.1")  # seules les brides servent ici
+os.environ.setdefault("FERME_RELAIS_PYTHON", "/usr/bin/python3")
 sys.path.insert(0, "/opt/ferme")
 import agent
 slug = sys.argv[1]

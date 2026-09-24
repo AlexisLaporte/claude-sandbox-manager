@@ -40,7 +40,12 @@ de client sur son propre Scaleway.
 | DELETE | `/api/bacs/{slug}` | déconnecte et détruit |
 | POST | `/api/bacs/{slug}/login` | démarre la connexion → `{url}` |
 | PUT | `/api/bacs/{slug}/login/code` | transmet le code → état |
-| POST | `/api/bacs/{slug}/runs` | `{prompt, model}` → résultat, `apiKeySource`, forfait, événements |
+| POST | `/api/bacs/{slug}/runs` | `{prompt, model, system?, mcp?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` |
+
+`mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors AUCUN outil intégré, seulement
+ceux du relais MCP d'oto-runner (`oto_runner.relais_mcp`), lancé dans le bac par le CLI. Le relais pose
+`_org`/`_project`/`_run_id` et refuse tout outil hors de `tools`. Le flux se termine par un
+`ferme_resume` qui dit, en cas d'échec, si le bac est encore connecté.
 
 `GET /` sert `index.html`, la page qui joue le futur écran du dashboard.
 
@@ -50,6 +55,7 @@ Box de test **box-agents** (DEV1-S, 2 Go → 2 runs de bac simultanés au plus),
 Montage, réseau et socle : `<dépôt-infra>`, `scripts/box-agents/README.md`.
 
 ```
+bash deploy/oto-runner.sh box-agents <checkout oto-runner>   # relais des bacs + worker, dans /srv/oto-runner
 bash deploy/installer.sh box-agents 10.0.0.2
 ```
 

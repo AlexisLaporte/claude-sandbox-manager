@@ -11,7 +11,8 @@ REST, jeton Bearer, écoute sur FERME_HOST (jamais une interface publique) :
   DELETE /api/bacs/{slug}               déconnecte et détruit le bac
   POST   /api/bacs/{slug}/login         démarre la connexion → {url}
   PUT    /api/bacs/{slug}/login/code    transmet le code → état
-  POST   /api/bacs/{slug}/runs          lance `claude -p`, un à la fois → résumé + événements
+  POST   /api/bacs/{slug}/runs          lance `claude -p`, un à la fois → résumé + événements,
+                                        ou le flux NDJSON (`Accept: application/x-ndjson`)
 """
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -29,6 +31,8 @@ JETON = os.environ["FERME_TOKEN"]
 HOTE = os.environ["FERME_HOST"]
 PORT = int(os.environ.get("FERME_PORT", "8190"))
 CLAUDE = "/usr/bin/claude"
+# Le Python d'oto-runner, lisible depuis les bacs : il lance le relais MCP (`oto_runner.relais_mcp`).
+RELAIS_PYTHON = os.environ["FERME_RELAIS_PYTHON"]
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 URL_LOGIN = re.compile(r"https://claude\.com/cai/oauth/authorize\S+")
 
@@ -42,9 +46,11 @@ BRIDES = [
     "100.64.0.0/10 fc00::/7 fe80::/10",
     # Le résolveur est systemd-resolved sur localhost : sans lui, pas de DNS, pas d'Anthropic.
     "IPAddressAllow=127.0.0.53/32 127.0.0.54/32",
-    "InaccessiblePaths=-/opt -/etc/ferme -/var/lib/postgresql",
+    "InaccessiblePaths=-/opt -/etc/ferme -/etc/oto-runner -/var/lib/postgresql",
+    "RuntimeMaxSec=1800",   # un run qui ne rend jamais la main ne tient pas le bac indéfiniment
 ]
 
+ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
 verrous = {}     # slug -> Lock : un run à la fois par bac
 verrou_global = threading.Lock()
@@ -174,39 +180,93 @@ def transmettre_code(slug, code):
     return etat(slug)
 
 
-def lancer_run(slug, prompt, modele):
+def reserver(slug):
+    """Un run à la fois par bac : deux rafraîchissements simultanés du jeton OAuth,
+    chacun faisant tourner le refresh token, casseraient la session."""
     exige_bac(slug)
     with verrou_global:
         verrou = verrous.setdefault(slug, threading.Lock())
     if not verrou.acquire(blocking=False):
         raise Erreur(409, "un run tourne déjà dans ce bac")
+    return verrou
+
+
+def ecrire_config_mcp(slug, mcp):
+    """La config MCP du run : le relais d'oto-runner, lancé DANS le bac par le CLI.
+
+    Elle porte le jeton délégué du travail (borné à son bail) : fichier du bac, 0600,
+    effacé à la fin du run."""
+    config = {"mcpServers": {"oto": {
+        "type": "stdio", "command": RELAIS_PYTHON, "args": ["-m", "oto_runner.relais_mcp"],
+        "env": {"OTO_MCP_URL": mcp["url"], "OTO_TOKEN": mcp["token"],
+                "OTO_ORG": str(mcp.get("org") or ""), "OTO_PROJECT": str(mcp.get("project") or ""),
+                "OTO_RUN_ID": mcp.get("run_id") or "", "OTO_TOOLS": ",".join(mcp.get("tools") or ())}}}}
+    chemin = home(slug) / f".ferme-mcp-{uuid.uuid4().hex}.json"
+    compte = pwd.getpwnam(utilisateur(slug))
+    fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(config, f)
+    os.chown(chemin, compte.pw_uid, compte.pw_gid)
+    return chemin
+
+
+def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
+    """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
+
+    Avec `mcp` : les seuls outils du run sont ceux du relais (aucun outil intégré,
+    aucune config utilisateur). Libère le bac quoi qu'il arrive."""
+    config = None
     try:
         debut = time.time()
-        p = dans_le_bac(slug, ["-p", prompt, "--output-format", "stream-json", "--verbose",
-                               "--model", modele])
-        sortie, _ = p.communicate(timeout=600)
-        evenements = []
-        for ligne in sortie.splitlines():
+        args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--model", modele]
+        if system:
+            args += ["--system-prompt", system]
+        if mcp is not None:
+            config = ecrire_config_mcp(slug, mcp)
+            args += ["--mcp-config", str(config), "--strict-mcp-config", "--tools", "",
+                     "--allowedTools", "mcp__oto", "--permission-mode", "dontAsk"]
+        p = dans_le_bac(slug, args)
+        resultat, brut = None, ""
+        for ligne in p.stdout:
             try:
-                evenements.append(json.loads(ligne))
+                ev = json.loads(ligne)
             except ValueError:
-                evenements.append({"type": "brut", "texte": ligne})
-        init = next((e for e in evenements if e.get("subtype") == "init"), {})
-        resultat = next((e for e in evenements if e.get("type") == "result"), None)
-        limites = [e["rate_limit_info"] for e in evenements if e.get("type") == "rate_limit_event"]
-        if resultat is None:
-            raise Erreur(502, f"run sans résultat : {sortie[-500:]}")
-        return {
-            "duree_s": round(time.time() - debut, 1),
-            "apiKeySource": init.get("apiKeySource"),
-            "modele": init.get("model"),
-            "resultat": resultat.get("result"),
-            "erreur": resultat.get("is_error"),
-            "forfait": limites[-1] if limites else None,
-            "evenements": evenements,
-        }
+                brut = ligne.strip() or brut     # stderr du CLI : gardé pour dire l'échec
+                continue
+            if ev.get("type") == "result":
+                resultat = ev
+            yield ev
+        p.wait(timeout=30)
+        resume = {"type": "ferme_resume", "duree_s": round(time.time() - debut, 1),
+                  "code": p.returncode}
+        if resultat is None or resultat.get("is_error"):
+            # Un échec se QUALIFIE : bac déconnecté (→ needs_login) ou autre chose.
+            resume["connecte"] = bool(etat(slug).get("loggedIn"))
+            resume["erreur"] = (resultat or {}).get("result") or brut or "flux sans résultat"
+        yield resume
     finally:
+        if config is not None:
+            config.unlink(missing_ok=True)
         verrou.release()
+
+
+def resume_du_run(evenements):
+    """Le run entier, résumé pour la page de test."""
+    evenements = list(evenements)
+    init = next((e for e in evenements if e.get("subtype") == "init"), {})
+    resultat = next((e for e in evenements if e.get("type") == "result"), {})
+    fin = next((e for e in evenements if e.get("type") == "ferme_resume"), {})
+    limites = [e["rate_limit_info"] for e in evenements if e.get("type") == "rate_limit_event"]
+    return {
+        "duree_s": fin.get("duree_s"),
+        "apiKeySource": init.get("apiKeySource"),
+        "modele": init.get("model"),
+        "resultat": resultat.get("result") or fin.get("erreur"),
+        "erreur": bool(resultat.get("is_error")) or "erreur" in fin,
+        "connecte": fin.get("connecte", True),
+        "forfait": limites[-1] if limites else None,
+        "evenements": evenements,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -237,18 +297,35 @@ class Handler(BaseHTTPRequestHandler):
             ("DELETE", None): lambda: detruire(slug),
             ("POST", "/login"): lambda: demarrer_connexion(slug, self._corps().get("email")),
             ("PUT", "/login/code"): lambda: transmettre_code(slug, self._corps()["code"]),
-            ("POST", "/runs"): lambda: lancer_run(slug, (c := self._corps())["prompt"],
-                                                  c.get("model", "sonnet")),
+            ("POST", "/runs"): lambda: self._run(slug, self._corps()),
         }
         action = routes.get((methode, sous))
         if action is None:
             return self._repondre(405, {"erreur": "méthode non permise"})
         try:
-            self._repondre(200, action())
+            reponse = action()
+            if reponse is not ENVOYE:
+                self._repondre(200, reponse)
         except Erreur as e:
             self._repondre(e.statut, {"erreur": str(e)})
         except (KeyError, ValueError) as e:
             self._repondre(400, {"erreur": f"requête invalide : {e}"})
+
+    def _run(self, slug, c):
+        verrou = reserver(slug)
+        flux = flux_du_run(slug, verrou, c["prompt"], c.get("model", "sonnet"),
+                           system=c.get("system"), mcp=c.get("mcp"))
+        if "application/x-ndjson" not in (self.headers.get("Accept") or ""):
+            return resume_du_run(flux)
+        # Le flux, au fil de l'eau : le worker prolonge son bail à chaque événement.
+        # HTTP/1.0 sans longueur : la fin du flux est la fermeture de la connexion.
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        for ev in flux:
+            self.wfile.write(json.dumps(ev, ensure_ascii=False).encode() + b"\n")
+            self.wfile.flush()
+        return ENVOYE
 
     def do_GET(self):
         self._router("GET")
