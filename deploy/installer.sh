@@ -16,6 +16,8 @@ if ! command -v node >/dev/null; then
 fi
 [ "$(claude --version 2>/dev/null | cut -d' ' -f1)" = "$VERSION" ] || \
   npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$VERSION" >/dev/null
+# Jamais régénéré : sa copie vit dans 1Password (coffre oto, « Ferme de Claude — jeton de l agent »),
+# c'est là que le backend le prend. Le changer = mettre à jour 1Password et prévenir l'infra.
 if [ ! -f /etc/ferme/agent.env ]; then
   umask 077
   printf 'FERME_TOKEN=%s\nFERME_HOST=%s\n' "$(openssl rand -hex 24)" "$IP" > /etc/ferme/agent.env
