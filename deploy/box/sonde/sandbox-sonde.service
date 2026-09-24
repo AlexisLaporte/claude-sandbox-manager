@@ -1,0 +1,8 @@
+[Unit]
+Description=Battement de santé de l'agent des sandboxes
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sandbox-sonde/env
+ExecStart=/usr/local/bin/sandbox-sonde
+DynamicUser=yes
+NoNewPrivileges=yes

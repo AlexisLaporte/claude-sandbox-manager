@@ -1,0 +1,11 @@
+#!/bin/bash
+# Battement de santé de l'agent, POUSSÉ vers un moniteur (Uptime Kuma en mode « push »).
+# GET / sans jeton → 200 attendu. Le moniteur passe au rouge si le battement manque.
+# Environnement (/etc/sandbox-sonde/env, 0600) : AGENT_URL, PUSH_URL.
+set -u
+t0=$(date +%s%N)
+code=$(curl -s -o /dev/null -m 10 -w "%{http_code}" "$AGENT_URL/")
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+if [ "$code" = 200 ]; then st=up; msg="agent OK ${ms} ms"; else st=down; msg="agent en échec (HTTP ${code})"; fi
+curl -s -o /dev/null -m 15 -G "$PUSH_URL" --data-urlencode "status=$st" --data-urlencode "msg=$msg" --data-urlencode "ping=$ms"
+echo "$st $msg"

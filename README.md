@@ -53,26 +53,14 @@ ceux du relais MCP d'oto-runner (`oto_runner.relais_mcp`), lancé dans le sandbo
 
 `GET /` sert `index.html`, la page qui joue le futur écran du dashboard.
 
-## Déploiement (box-agents)
+## Déploiement
 
-Box de test **box-agents** (DEV1-S, 2 Go → 2 runs de sandbox simultanés au plus), IP privée `10.0.0.2`.
-Montage, réseau et socle : `<dépôt-infra>`, `scripts/box-agents/README.md`.
+**Procédure complète, de la box nue aux premières personnes : [`DEPLOIEMENT.md`](DEPLOIEMENT.md).**
+Scripts : `deploy/box/box.sh` (pare-feu du réseau privé, socle, sonde), `deploy/oto-runner.sh`,
+`deploy/installer.sh` (agent), `deploy/worker.sh` (worker `claude-subscription`).
 
-```
-bash deploy/oto-runner.sh box-agents <checkout oto-runner>   # relais des sandboxes + worker, dans /srv/oto-runner
-bash deploy/installer.sh box-agents 10.0.0.2
-```
-
-Idempotent : Node 22, Claude Code **épinglé** (`CLAUDE_CODE_VERSION` dans le script), code et unité,
-`/etc/ferme/agent.env` (0600 : `FERME_TOKEN`, `FERME_HOST`) créé au premier passage seulement.
-
-L'agent écoute sur l'IP privée ; nftables (table `ferme_pn`) n'y laisse entrer que oto-platform
-(10.0.0.5). Aucun port public hors 22 et Beszel. Accès de test depuis un poste :
-`ssh -N -L 8190:10.0.0.2:8190 box-agents` puis `http://localhost:8190`.
-
-Test d'isolation, à rejouer depuis un vrai run après toute modification des brides :
-`tests/isolation.js` posé dans `/usr/local/share/ferme/` (`/opt` est invisible du sandbox), puis
-`python3 /opt/ferme/isolation.py <slug>` sur la box.
+Notre instance : box `box-agents` (DEV1-S, IP privée `10.0.0.2`), backend `mcp.example.com`. Ce qui est propre
+à notre parc (IP, supervision, inventaire) vit dans `<dépôt-infra>`, `scripts/box-agents/`.
 
 ## Ce qui manque pour un produit
 

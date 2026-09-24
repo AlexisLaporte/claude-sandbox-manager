@@ -1,0 +1,16 @@
+#!/usr/sbin/nft -f
+# Filtre du RÉSEAU PRIVÉ de la box : seul le backend joint l'agent. Rendu par box.sh.
+# Un Security Group de fournisseur ne filtre souvent PAS le réseau privé (Scaleway : jamais) :
+# sans ce filtre, toute machine du réseau privé joindrait l'agent, qui tourne en root.
+table inet sandbox_pn
+delete table inet sandbox_pn
+table inet sandbox_pn {
+  chain input {
+    type filter hook input priority filter - 5; policy accept;
+    iifname != "@IFACE_PRIVEE@" accept
+    ct state established,related accept
+    meta l4proto { icmp, ipv6-icmp } accept
+    ip saddr @IP_BACKEND@ tcp dport @PORT@ accept
+    counter drop
+  }
+}

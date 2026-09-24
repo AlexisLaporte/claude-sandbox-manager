@@ -1,0 +1,7 @@
+[Unit]
+Description=Battement de santé de l'agent des sandboxes, toutes les 2 min
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target
