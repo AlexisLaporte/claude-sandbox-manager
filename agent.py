@@ -83,6 +83,10 @@ def unite_de_connexion(slug):
     return f"ferme-login-{slug}.service"
 
 
+def unite_de_run(slug):
+    return f"ferme-run-{slug}.service"
+
+
 def dans_le_bac(slug, args, unite=None):
     """Commande exécutée comme la personne, dans une unité éphémère bridée."""
     cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect",
@@ -215,7 +219,7 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
 
     Avec `mcp` : les seuls outils du run sont ceux du relais (aucun outil intégré,
     aucune config utilisateur). Libère le bac quoi qu'il arrive."""
-    config = None
+    config, p = None, None
     try:
         debut = time.time()
         args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--model", modele]
@@ -225,7 +229,7 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
             config = ecrire_config_mcp(slug, mcp)
             args += ["--mcp-config", str(config), "--strict-mcp-config", "--tools", "",
                      "--allowedTools", "mcp__oto", "--permission-mode", "dontAsk"]
-        p = dans_le_bac(slug, args)
+        p = dans_le_bac(slug, args, unite=unite_de_run(slug))
         resultat, brut = None, ""
         for ligne in p.stdout:
             try:
@@ -245,6 +249,13 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
             resume["erreur"] = (resultat or {}).get("result") or brut or "flux sans résultat"
         yield resume
     finally:
+        # Flux abandonné (le worker s'est arrêté, la connexion est tombée) : le CLI
+        # tournerait encore dans le bac après sa libération, et un second run pourrait
+        # y partir sur la même session. On arrête l'UNITÉ — tuer le client
+        # systemd-run ne suffit pas.
+        if p is not None and p.poll() is None:
+            subprocess.run(["systemctl", "stop", unite_de_run(slug)])
+            p.wait(timeout=30)
         if config is not None:
             config.unlink(missing_ok=True)
         verrou.release()
