@@ -20,6 +20,10 @@ Type=exec
 User=oto-runner
 Group=oto-runner
 EnvironmentFile=/etc/oto-runner/abonnement.env
+# Les journaux de passage (`passages/`, relatif au répertoire courant) : un dossier
+# d'état à l'instance, seul endroit inscriptible sous ProtectSystem=strict.
+StateDirectory=oto-runner-abonnement/%i
+WorkingDirectory=/var/lib/oto-runner-abonnement/%i
 ExecStart=/srv/oto-runner/.venv/bin/python -m oto_runner.worker
 Restart=on-failure
 RestartSec=30
