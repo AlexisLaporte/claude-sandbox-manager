@@ -35,7 +35,10 @@ BRIDES = [
     "MemoryMax=500M", "MemorySwapMax=0", "CPUQuota=80%", "TasksMax=64",
     "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "PrivateDevices=yes",
     "NoNewPrivileges=yes", "ProtectKernelTunables=yes", "ProtectControlGroups=yes",
-    "RestrictSUIDSGID=yes", "IPAddressDeny=127.0.0.0/8 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16",
+    "RestrictSUIDSGID=yes", # Métadonnées Scaleway (169.254.42.42 : user-data, clés SSH, sans authentification),
+    # réseaux privés et locaux, IPv4 et IPv6.
+    "IPAddressDeny=127.0.0.0/8 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 "
+    "100.64.0.0/10 fc00::/7 fe80::/10",
     # Le résolveur est systemd-resolved sur localhost : sans lui, pas de DNS, pas d'Anthropic.
     "IPAddressAllow=127.0.0.53/32 127.0.0.54/32",
     "InaccessiblePaths=-/opt -/etc/ferme -/var/lib/postgresql",
