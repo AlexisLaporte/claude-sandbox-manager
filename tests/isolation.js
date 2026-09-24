@@ -11,7 +11,7 @@ const port = p => new Promise(r => {
     x => { console.log("métadonnées 169.254.42.42 JOIGNABLES", x.statusCode); r(); })
     .on("error", e => { console.log("métadonnées bloquées", e.code); r(); })
     .on("timeout", function () { console.log("métadonnées bloquées (timeout)"); this.destroy(); r(); }));
-  for (const f of ["/opt/deploy", "/etc/ferme", "/srv/ferme/bacs"]) {
+  for (const f of ["/opt/deploy", "/etc/ferme", "/srv/sandboxes"]) {
     try { fs.readdirSync(f); console.log(f, "lisible"); } catch (e) { console.log(f, "refusé", e.code); }
   }
   fs.writeFileSync(`${process.env.HOME}/ok`, "1"); console.log("home écrivable");

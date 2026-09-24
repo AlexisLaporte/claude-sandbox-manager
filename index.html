@@ -70,9 +70,9 @@
 
 <details>
   <summary>Technique</summary>
-  <label>Identifiant du bac</label><input id="slug" value="alexis" onchange="demarrer()">
+  <label>Identifiant du sandbox</label><input id="slug" value="alexis" onchange="demarrer()">
   <button class="lien" onclick="demarrer()">Relire l'état</button> ·
-  <button class="lien" onclick="detruire()">Déconnecter et détruire le bac</button> ·
+  <button class="lien" onclick="detruire()">Déconnecter et détruire le sandbox</button> ·
   <button class="lien" onclick="oublierJeton()">Changer de jeton</button>
   <pre id="brut"></pre>
 </details>
@@ -90,7 +90,7 @@ async function appel(methode, sous, corps) {
   document.querySelectorAll('button').forEach(b => b.disabled = true);
   $('erreur').textContent = '';
   try {
-    const r = await fetch(`/api/bacs/${encodeURIComponent($('slug').value.trim())}${sous}`, {
+    const r = await fetch(`/api/sandboxes/${encodeURIComponent($('slug').value.trim())}${sous}`, {
       method: methode,
       headers: { 'Authorization': `Bearer ${jeton}`, 'Content-Type': 'application/json' },
       body: corps ? JSON.stringify(corps) : undefined,
@@ -131,7 +131,7 @@ function oublierJeton() {
 }
 async function connecter() {
   try {
-    await appel('PUT', '');   // crée le bac s'il n'existe pas
+    await appel('PUT', '');   // crée le sandbox s'il n'existe pas
     const d = await appel('POST', '/login', {});
     $('lien').href = d.url;
     $('code').value = '';
@@ -161,7 +161,7 @@ async function lancer() {
   } catch (e) { $('resultat').innerHTML = ''; echec(e); }
 }
 async function detruire() {
-  if (!confirm('Déconnecter ton abonnement et détruire ce bac ?')) return;
+  if (!confirm('Déconnecter ton abonnement et détruire ce sandbox ?')) return;
   try { await appel('DELETE', ''); demarrer(); } catch (e) { echec(e); }
 }
 demarrer();

@@ -22,7 +22,7 @@ if [ ! -f /etc/ferme/agent.env ]; then
   umask 077
   printf 'FERME_TOKEN=%s\nFERME_HOST=%s\n' "$(openssl rand -hex 24)" "$IP" > /etc/ferme/agent.env
 fi
-# Le relais MCP des bacs vient d'oto-runner (deploy/oto-runner.sh) : ajouté sans toucher au jeton.
+# Le relais MCP des sandboxes vient d'oto-runner (deploy/oto-runner.sh) : ajouté sans toucher au jeton.
 grep -q '^FERME_RELAIS_PYTHON=' /etc/ferme/agent.env || \
   echo 'FERME_RELAIS_PYTHON=/srv/oto-runner/.venv/bin/python' >> /etc/ferme/agent.env
 systemctl daemon-reload

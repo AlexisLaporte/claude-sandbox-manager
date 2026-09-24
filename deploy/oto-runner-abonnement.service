@@ -1,15 +1,15 @@
 # Worker oto-runner de la famille `claude_subscription` — sur la box de la ferme.
-# Il réserve les travaux d'abonnement et les fait tourner dans le bac de leur porteur,
+# Il réserve les travaux d'abonnement et les fait tourner dans le sandbox de leur porteur,
 # par l'agent de la box (OTO_FERME_URL). Il ne détient AUCUNE clé de modèle.
 #
 # Non-root (avis infra du 24/09/2026) : les workers d'oto-platform tournent en root,
-# celui-ci non. /etc/oto-runner (son secret `otow_`) est invisible des bacs
+# celui-ci non. /etc/oto-runner (son secret `otow_`) est invisible des sandboxes
 # (InaccessiblePaths de l'agent).
 #
 # Arrêt gracieux : même contrat que graceful.conf d'oto-runner (SIGTERM = ne plus
-# réserver, finir, sortir), mais la patience suit le plafond d'un run de bac
+# réserver, finir, sortir), mais la patience suit le plafond d'un run de sandbox
 # (RuntimeMaxSec=1800 côté agent), pas le bail de 960 s : un run coupé en vol serait
-# repris par un pair pendant que le CLI tourne encore dans le bac.
+# repris par un pair pendant que le CLI tourne encore dans le sandbox.
 [Unit]
 Description=oto-runner worker abonnement %i (ferme)
 After=network-online.target ferme-agent.service

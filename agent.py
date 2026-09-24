@@ -1,17 +1,17 @@
 """Agent de box de la ferme de Claude (POC).
 
-Un bac = un utilisateur Unix `bac-<slug>` dont le HOME porte la session Claude Code
-de la personne. Chaque commande dans un bac tourne dans une unité systemd éphémère
+Un sandbox = un utilisateur Unix `sandbox-<slug>` dont le HOME porte la session Claude Code
+de la personne. Chaque commande dans un sandbox tourne dans une unité systemd éphémère
 bridée (mémoire, CPU, système en lecture seule, pas d'accès à localhost).
 
 REST, jeton Bearer, écoute sur FERME_HOST (jamais une interface publique) :
   GET    /                              page de test
-  GET    /api/bacs/{slug}               état de connexion (claude auth status)
-  PUT    /api/bacs/{slug}               crée le bac
-  DELETE /api/bacs/{slug}               déconnecte et détruit le bac
-  POST   /api/bacs/{slug}/login         démarre la connexion → {url}
-  PUT    /api/bacs/{slug}/login/code    transmet le code → état
-  POST   /api/bacs/{slug}/runs          lance `claude -p`, un à la fois → résumé + événements,
+  GET    /api/sandboxes/{slug}               état de connexion (claude auth status)
+  PUT    /api/sandboxes/{slug}               crée le sandbox
+  DELETE /api/sandboxes/{slug}               déconnecte et détruit le sandbox
+  POST   /api/sandboxes/{slug}/login         démarre la connexion → {url}
+  PUT    /api/sandboxes/{slug}/login/code    transmet le code → état
+  POST   /api/sandboxes/{slug}/runs          lance `claude -p`, un à la fois → résumé + événements,
                                         ou le flux NDJSON (`Accept: application/x-ndjson`)
 """
 import json
@@ -25,13 +25,13 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-RACINE = Path("/srv/ferme/bacs")
+RACINE = Path("/srv/sandboxes")
 PAGE = Path(__file__).with_name("index.html")
 JETON = os.environ["FERME_TOKEN"]
 HOTE = os.environ["FERME_HOST"]
 PORT = int(os.environ.get("FERME_PORT", "8190"))
 CLAUDE = "/usr/bin/claude"
-# Le Python d'oto-runner, lisible depuis les bacs : il lance le relais MCP (`oto_runner.relais_mcp`).
+# Le Python d'oto-runner, lisible depuis les sandboxes : il lance le relais MCP (`oto_runner.relais_mcp`).
 RELAIS_PYTHON = os.environ["FERME_RELAIS_PYTHON"]
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 URL_LOGIN = re.compile(r"https://claude\.com/cai/oauth/authorize\S+")
@@ -47,12 +47,12 @@ BRIDES = [
     # Le résolveur est systemd-resolved sur localhost : sans lui, pas de DNS, pas d'Anthropic.
     "IPAddressAllow=127.0.0.53/32 127.0.0.54/32",
     "InaccessiblePaths=-/opt -/etc/ferme -/etc/oto-runner -/var/lib/postgresql",
-    "RuntimeMaxSec=1800",   # un run qui ne rend jamais la main ne tient pas le bac indéfiniment
+    "RuntimeMaxSec=1800",   # un run qui ne rend jamais la main ne tient pas le sandbox indéfiniment
 ]
 
 ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
-verrous = {}     # slug -> Lock : un run à la fois par bac
+verrous = {}     # slug -> Lock : un run à la fois par sandbox
 verrou_global = threading.Lock()
 
 
@@ -63,31 +63,31 @@ class Erreur(Exception):
 
 
 def utilisateur(slug):
-    return f"bac-{slug}"
+    return f"sandbox-{slug}"
 
 
 def home(slug):
     return RACINE / slug
 
 
-def exige_bac(slug):
+def exige_sandbox(slug):
     if not SLUG.match(slug):
         raise Erreur(400, "slug invalide")
     try:
         pwd.getpwnam(utilisateur(slug))
     except KeyError:
-        raise Erreur(404, "bac inconnu")
+        raise Erreur(404, "sandbox inconnu")
 
 
 def unite_de_connexion(slug):
-    return f"ferme-login-{slug}.service"
+    return f"sandbox-login-{slug}.service"
 
 
 def unite_de_run(slug):
-    return f"ferme-run-{slug}.service"
+    return f"sandbox-run-{slug}.service"
 
 
-def dans_le_bac(slug, args, unite=None):
+def dans_le_sandbox(slug, args, unite=None):
     """Commande exécutée comme la personne, dans une unité éphémère bridée."""
     cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect",
            *([f"--unit={unite}"] if unite else []),
@@ -103,7 +103,7 @@ def dans_le_bac(slug, args, unite=None):
 
 
 def etat(slug):
-    p = dans_le_bac(slug, ["auth", "status"])
+    p = dans_le_sandbox(slug, ["auth", "status"])
     sortie, _ = p.communicate(timeout=60)
     try:
         return json.loads(sortie[sortie.index("{"):])
@@ -120,7 +120,7 @@ def creer(slug):
     except KeyError:
         pass
     RACINE.mkdir(parents=True, exist_ok=True)
-    RACINE.chmod(0o711)  # traverser jusqu'à son bac, jamais lister ceux des autres
+    RACINE.chmod(0o711)  # traverser jusqu'à son sandbox, jamais lister ceux des autres
     subprocess.run(["useradd", "--system", "--create-home", "--home-dir", str(home(slug)),
                     "--shell", "/usr/sbin/nologin", utilisateur(slug)], check=True)
     os.chmod(home(slug), 0o700)
@@ -128,9 +128,9 @@ def creer(slug):
 
 
 def detruire(slug):
-    exige_bac(slug)
+    exige_sandbox(slug)
     abandonner_connexion(slug)
-    deconnexion = dans_le_bac(slug, ["auth", "logout"])
+    deconnexion = dans_le_sandbox(slug, ["auth", "logout"])
     deconnexion.communicate(timeout=60)
     # Un run encore en vol empêcherait userdel : la destruction l'emporte.
     subprocess.run(["pkill", "--signal", "KILL", "--uid", utilisateur(slug)])
@@ -151,10 +151,10 @@ def abandonner_connexion(slug):
 
 
 def demarrer_connexion(slug, email):
-    exige_bac(slug)
+    exige_sandbox(slug)
     abandonner_connexion(slug)
     args = ["auth", "login", "--claudeai"] + (["--email", email] if email else [])
-    p = dans_le_bac(slug, args, unite=unite_de_connexion(slug))
+    p = dans_le_sandbox(slug, args, unite=unite_de_connexion(slug))
     lu, limite = "", time.time() + 30
     while time.time() < limite:
         ligne = p.stdout.readline()
@@ -170,7 +170,7 @@ def demarrer_connexion(slug, email):
 
 
 def transmettre_code(slug, code):
-    exige_bac(slug)
+    exige_sandbox(slug)
     p = connexions.pop(slug, None)
     if p is None or p.poll() is not None:
         raise Erreur(409, "aucune connexion en attente — la redémarrer")
@@ -185,20 +185,20 @@ def transmettre_code(slug, code):
 
 
 def reserver(slug):
-    """Un run à la fois par bac : deux rafraîchissements simultanés du jeton OAuth,
+    """Un run à la fois par sandbox : deux rafraîchissements simultanés du jeton OAuth,
     chacun faisant tourner le refresh token, casseraient la session."""
-    exige_bac(slug)
+    exige_sandbox(slug)
     with verrou_global:
         verrou = verrous.setdefault(slug, threading.Lock())
     if not verrou.acquire(blocking=False):
-        raise Erreur(409, "un run tourne déjà dans ce bac")
+        raise Erreur(409, "un run tourne déjà dans ce sandbox")
     return verrou
 
 
 def ecrire_config_mcp(slug, mcp):
-    """La config MCP du run : le relais d'oto-runner, lancé DANS le bac par le CLI.
+    """La config MCP du run : le relais d'oto-runner, lancé DANS le sandbox par le CLI.
 
-    Elle porte le jeton délégué du travail (borné à son bail) : fichier du bac, 0600,
+    Elle porte le jeton délégué du travail (borné à son bail) : fichier du sandbox, 0600,
     effacé à la fin du run."""
     config = {"mcpServers": {"oto": {
         "type": "stdio", "command": RELAIS_PYTHON, "args": ["-m", "oto_runner.relais_mcp"],
@@ -218,7 +218,7 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
     Avec `mcp` : les seuls outils du run sont ceux du relais (aucun outil intégré,
-    aucune config utilisateur). Libère le bac quoi qu'il arrive."""
+    aucune config utilisateur). Libère le sandbox quoi qu'il arrive."""
     config, p = None, None
     try:
         debut = time.time()
@@ -229,7 +229,7 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
             config = ecrire_config_mcp(slug, mcp)
             args += ["--mcp-config", str(config), "--strict-mcp-config", "--tools", "",
                      "--allowedTools", "mcp__oto", "--permission-mode", "dontAsk"]
-        p = dans_le_bac(slug, args, unite=unite_de_run(slug))
+        p = dans_le_sandbox(slug, args, unite=unite_de_run(slug))
         resultat, brut = None, ""
         for ligne in p.stdout:
             try:
@@ -244,13 +244,13 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
         resume = {"type": "ferme_resume", "duree_s": round(time.time() - debut, 1),
                   "code": p.returncode}
         if resultat is None or resultat.get("is_error"):
-            # Un échec se QUALIFIE : bac déconnecté (→ needs_login) ou autre chose.
+            # Un échec se QUALIFIE : sandbox déconnecté (→ needs_login) ou autre chose.
             resume["connecte"] = bool(etat(slug).get("loggedIn"))
             resume["erreur"] = (resultat or {}).get("result") or brut or "flux sans résultat"
         yield resume
     finally:
         # Flux abandonné (le worker s'est arrêté, la connexion est tombée) : le CLI
-        # tournerait encore dans le bac après sa libération, et un second run pourrait
+        # tournerait encore dans le sandbox après sa libération, et un second run pourrait
         # y partir sur la même session. On arrête l'UNITÉ — tuer le client
         # systemd-run ne suffit pas.
         if p is not None and p.poll() is None:
@@ -298,12 +298,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._repondre(200, PAGE.read_bytes(), "text/html; charset=utf-8")
         if self.headers.get("Authorization") != f"Bearer {JETON}":
             return self._repondre(401, {"erreur": "jeton manquant ou invalide"})
-        m = re.match(r"^/api/bacs/([^/]+)(/login|/login/code|/runs)?$", self.path)
+        m = re.match(r"^/api/sandboxes/([^/]+)(/login|/login/code|/runs)?$", self.path)
         if not m:
             return self._repondre(404, {"erreur": "route inconnue"})
         slug, sous = m.groups()
         routes = {
-            ("GET", None): lambda: etat(exige_bac(slug) or slug),
+            ("GET", None): lambda: etat(exige_sandbox(slug) or slug),
             ("PUT", None): lambda: creer(slug),
             ("DELETE", None): lambda: detruire(slug),
             ("POST", "/login"): lambda: demarrer_connexion(slug, self._corps().get("email")),

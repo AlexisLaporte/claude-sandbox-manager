@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pose oto-runner sur la box de la ferme : bash deploy/oto-runner.sh <hôte-ssh> <checkout oto-runner>
-# Deux usages d'un même code : le relais MCP lancé DANS les bacs (d'où /srv, lisible par eux —
+# Deux usages d'un même code : le relais MCP lancé DANS les sandboxes (d'où /srv, lisible par eux —
 # /opt leur est invisible) et le worker `claude-subscription`, sous l'utilisateur `oto-runner`.
 set -euo pipefail
 HOTE_SSH=$1 CHECKOUT=$2
