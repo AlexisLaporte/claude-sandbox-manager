@@ -4,7 +4,9 @@ Faire tourner un agent sur **l'abonnement Claude personnel** de son propriétair
 connecté par elle-même, lancé sans surveillance. Besoin porté par client (lot 1), contrat backend
 dans `oto-backend#1043`.
 
-**Statut : POC validé le 23/09/2026 sur box-client.** Pas un produit — voir « Ce qui manque ».
+**Statut : POC validé le 23/09/2026 sur box-client (retiré depuis) ; agent posé en TEST sur box-agents le 24/09/2026.**
+Pas un produit — voir « Ce qui manque ». Décision d'Alexis : aucun bac réel ni runner déplacé avant la bascule
+de client sur son propre Scaleway.
 
 ## Ce que ça prouve
 
@@ -29,7 +31,7 @@ dans `oto-backend#1043`.
   token, casseraient la session.
 - **Destruction** : `claude auth logout`, `pkill` des processus du bac, `userdel --remove`.
 
-## API (REST, Bearer, 127.0.0.1:8190)
+## API (REST, Bearer, `FERME_HOST`:8190)
 
 | méthode | route | effet |
 | --- | --- | --- |
@@ -42,25 +44,29 @@ dans `oto-backend#1043`.
 
 `GET /` sert `index.html`, la page qui joue le futur écran du dashboard.
 
-## Déploiement (box-client)
+## Déploiement (box-agents)
+
+Box de test **box-agents** (DEV1-S, 2 Go → 2 runs de bac simultanés au plus), IP privée `10.0.0.2`.
+Montage, réseau et socle : `<dépôt-infra>`, `scripts/box-agents/README.md`.
 
 ```
-npm install -g @anthropic-ai/claude-code
-scp agent.py index.html root@203.0.113.10:/opt/ferme/
-scp deploy/ferme-agent.service root@203.0.113.10:/etc/systemd/system/
-# /etc/ferme/agent.env (0600) : FERME_TOKEN=<openssl rand -hex 24>
-systemctl daemon-reload && systemctl enable --now ferme-agent
+bash deploy/installer.sh box-agents 10.0.0.2
 ```
 
-Accès : `ssh -N -L 8190:127.0.0.1:8190 root@203.0.113.10` puis `http://localhost:8190`.
-Aucun vhost Caddy ni DNS : la box et sa config appartiennent à client (`client-team/infra`).
+Idempotent : Node 22, Claude Code **épinglé** (`CLAUDE_CODE_VERSION` dans le script), code et unité,
+`/etc/ferme/agent.env` (0600 : `FERME_TOKEN`, `FERME_HOST`) créé au premier passage seulement.
 
-Test d'isolation : `tests/isolation.py <slug>` lance `tests/isolation.js` (à poser dans
-`/usr/local/share/ferme/`, `/opt` étant invisible du bac) avec exactement les brides de l'agent.
+L'agent écoute sur l'IP privée ; nftables (table `ferme_pn`) n'y laisse entrer que oto-platform
+(10.0.0.5). Aucun port public hors 22 et Beszel. Accès de test depuis un poste :
+`ssh -N -L 8190:10.0.0.2:8190 box-agents` puis `http://localhost:8190`.
+
+Test d'isolation, à rejouer depuis un vrai run après toute modification des brides :
+`tests/isolation.js` posé dans `/usr/local/share/ferme/` (`/opt` est invisible du bac), puis
+`python3 /opt/ferme/isolation.py <slug>` sur la box.
 
 ## Ce qui manque pour un produit
 
-- Une box dédiée : box-client a ~760 Mo libres, sans swap, à côté de la prod client.
+- Workers et agent non-root côté runner ; lecture des secrets depuis le Secret Manager Scaleway.
 - L'agent derrière le backend (`#1043` : `upsert_sandbox`, `marquer_statut`, pool `claude_subscription`)
   et l'écran dans le dashboard.
 - Une sonde `claude auth status` périodique → `needs_login`.

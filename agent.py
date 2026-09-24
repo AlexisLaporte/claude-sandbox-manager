@@ -4,7 +4,7 @@ Un bac = un utilisateur Unix `bac-<slug>` dont le HOME porte la session Claude C
 de la personne. Chaque commande dans un bac tourne dans une unité systemd éphémère
 bridée (mémoire, CPU, système en lecture seule, pas d'accès à localhost).
 
-REST, jeton Bearer, écoute sur 127.0.0.1 seulement :
+REST, jeton Bearer, écoute sur FERME_HOST (jamais une interface publique) :
   GET    /                              page de test
   GET    /api/bacs/{slug}               état de connexion (claude auth status)
   PUT    /api/bacs/{slug}               crée le bac
@@ -26,6 +26,7 @@ from pathlib import Path
 RACINE = Path("/srv/ferme/bacs")
 PAGE = Path(__file__).with_name("index.html")
 JETON = os.environ["FERME_TOKEN"]
+HOTE = os.environ["FERME_HOST"]
 PORT = int(os.environ.get("FERME_PORT", "8190"))
 CLAUDE = "/usr/bin/claude"
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
@@ -263,4 +264,4 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    ThreadingHTTPServer((HOTE, PORT), Handler).serve_forever()

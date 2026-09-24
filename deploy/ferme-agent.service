@@ -1,10 +1,14 @@
 [Unit]
-Description=Ferme de Claude — agent de box (POC, 127.0.0.1:8190)
+Description=Ferme de Claude — agent de box (écoute sur le réseau privé, FERME_HOST)
 After=network-online.target
+Wants=network-online.target
+
 [Service]
+# FERME_TOKEN (jeton partagé avec le backend) et FERME_HOST (IP privée de la box)
 EnvironmentFile=/etc/ferme/agent.env
 ExecStart=/usr/bin/python3 /opt/ferme/agent.py
 Restart=on-failure
 MemoryMax=150M
+
 [Install]
 WantedBy=multi-user.target
