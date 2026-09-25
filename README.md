@@ -39,17 +39,50 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 
 | méthode | route | effet |
 | --- | --- | --- |
-| GET | `/api/sandboxes/{slug}` | état (`claude auth status`) |
+| GET | `/api/sandboxes/{slug}` | état : la session (`claude auth status`) + `apiKey` (une clé est posée) |
 | PUT | `/api/sandboxes/{slug}` | crée le sandbox (idempotent) |
 | DELETE | `/api/sandboxes/{slug}` | déconnecte et détruit |
 | POST | `/api/sandboxes/{slug}/login` | démarre la connexion → `{url}` |
 | PUT | `/api/sandboxes/{slug}/login/code` | transmet le code → état |
-| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` |
+| PUT | `/api/sandboxes/{slug}/key` | pose (ou remplace) une clé d'API `{api_key}` → état |
+| DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
+| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` |
 
 `mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors AUCUN outil intégré, seulement
 ceux du relais MCP d'oto-runner (`oto_runner.relais_mcp`), lancé dans le sandbox par le CLI. Le relais pose
 `_org`/`_project`/`_run_id` et refuse tout outil hors de `tools`. Le flux se termine par un
 `ferme_resume` qui dit, en cas d'échec, si le sandbox est encore connecté.
+
+### Deux connexions : session et clé d'API
+
+Un sandbox peut porter une **session claude.ai** (`/login`, faite par la personne elle-même), une **clé
+d'API** de la Console (`/key`), ou les deux. Chaque run dit ce qui le paie : `auth: "key"` ou
+`auth: "session"`. **Sans `auth`, c'est la session** : poser une clé ne fait jamais basculer les runs d'un
+appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'envoie pas `auth`).
+`auth: "key"` sans clé posée → 409.
+
+- **Où vit la clé** : `/etc/ferme/cles/<slug>` (root, 0600, `FERME_CLES`), **hors du sandbox**, dans un
+  répertoire que les brides rendent invisible. Elle n'entre que dans l'environnement du run, par
+  `EnvironmentFile=` de l'unité — jamais en argv (lisible de tous dans `/proc`), jamais dans le HOME
+  (systemd lit ce fichier en root et suit les liens : un sandbox pourrait y substituer un lien vers un
+  secret de la box).
+- **Ce qui est refusé** : tout ce qui n'est pas `sk-ant-api…` (422), et nommément un jeton de session
+  `sk-ant-oat…` — intermédier un identifiant claude.ai est interdit par Anthropic ; une session se
+  connecte par `/login`.
+- **Le CLI doit confirmer** : `system/init.apiKeySource` doit valoir `ANTHROPIC_API_KEY` pour un run par
+  clé, `none` pour un run par session. Sinon (précédence inattendue, `apiKeyHelper` posé dans le HOME du
+  sandbox…) le run est **arrêté avant tout tour** et `ferme_resume.erreur` commence par `auth_mismatch`.
+- `ferme_resume` porte `auth` ; en cas d'échec, `connecte` dit si ce qui payait est encore là (session
+  toujours connectée, clé toujours posée). Une clé **refusée** par l'API reste « posée » : le refus est dans
+  `erreur`, pas un `needs_login`.
+- **Pour les consommateurs** : un sandbox à clé seule répond `loggedIn: false` — lire `apiKey`, pas
+  seulement `loggedIn`, avant de conclure qu'il faut se reconnecter.
+- Un run à la fois par sandbox, clé comprise (même unité `sandbox-run-<slug>`).
+
+Tests hors box : `python3 -m unittest discover -s tests -p 'test_*.py'`. **À vérifier sur la box** avant
+usage : `systemd-run -p EnvironmentFile=…` accepté pour une unité éphémère et lu malgré
+`InaccessiblePaths=/etc/ferme` ; aucun `sk-ant-api` dans `ps`/`/proc/*/cmdline` pendant un run ; sur un
+sandbox qui a les deux, un run `key` annonce `ANTHROPIC_API_KEY` et un run `session` annonce `none`.
 
 `GET /` sert `index.html`, la page qui joue le futur écran du dashboard.
 

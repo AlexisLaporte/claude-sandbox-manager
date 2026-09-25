@@ -1,16 +1,25 @@
 """Agent de box de la ferme de Claude (POC).
 
-Un sandbox = un utilisateur Unix `sandbox-<slug>` dont le HOME porte la session Claude Code
-de la personne. Chaque commande dans un sandbox tourne dans une unité systemd éphémère
+Un sandbox = un utilisateur Unix `sandbox-<slug>` dont le HOME porte ce qui authentifie
+Claude Code : la session claude.ai de la personne (`claude auth login`), et/ou une clé
+d'API (`/key`). Chaque commande dans un sandbox tourne dans une unité systemd éphémère
 bridée (mémoire, CPU, système en lecture seule, pas d'accès à localhost).
+
+Deux façons de payer un run, et c'est la ferme qui tranche, pas le CLI : `auth=key` sert
+la clé (posée dans l'environnement de l'unité par `EnvironmentFile=`, jamais en argv),
+`auth=session` la session. Sans `auth` : la session, comme avant la clé — poser une clé ne
+fait jamais basculer les runs d'un appelant qui ne la demande pas. Et le CLI doit le
+confirmer : un run dont `init.apiKeySource` ne dit pas ce qu'on a servi est arrêté.
 
 REST, jeton Bearer, écoute sur FERME_HOST (jamais une interface publique) :
   GET    /                              page de test
-  GET    /api/sandboxes/{slug}               état de connexion (claude auth status)
+  GET    /api/sandboxes/{slug}               état : session (claude auth status) + `apiKey`
   PUT    /api/sandboxes/{slug}               crée le sandbox
   DELETE /api/sandboxes/{slug}               déconnecte et détruit le sandbox
   POST   /api/sandboxes/{slug}/login         démarre la connexion → {url}
   PUT    /api/sandboxes/{slug}/login/code    transmet le code → état
+  PUT    /api/sandboxes/{slug}/key           pose une clé d'API {api_key} → état
+  DELETE /api/sandboxes/{slug}/key           retire la clé → état
   POST   /api/sandboxes/{slug}/runs          lance `claude -p`, un à la fois → résumé + événements,
                                         ou le flux NDJSON (`Accept: application/x-ndjson`)
 """
@@ -25,7 +34,12 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-RACINE = Path("/srv/sandboxes")
+RACINE = Path(os.environ.get("FERME_RACINE", "/srv/sandboxes"))
+# Les clés d'API vivent HORS des sandboxes, dans un répertoire de root que les brides
+# rendent invisible (`/etc/ferme`) : systemd lit l'EnvironmentFile en root et suit les
+# liens — un fichier posé dans le HOME du sandbox pourrait y être remplacé par un lien
+# vers un secret de la box, versé ensuite dans l'environnement du run.
+CLES = Path(os.environ.get("FERME_CLES", "/etc/ferme/cles"))
 PAGE = Path(__file__).with_name("index.html")
 JETON = os.environ["FERME_TOKEN"]
 HOTE = os.environ["FERME_HOST"]
@@ -35,6 +49,17 @@ CLAUDE = "/usr/bin/claude"
 RELAIS_PYTHON = os.environ["FERME_RELAIS_PYTHON"]
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 URL_LOGIN = re.compile(r"https://claude\.com/cai/oauth/authorize\S+")
+# Une clé d'API de la Console, et rien d'autre : la forme est aussi ce qui garantit que la
+# ligne écrite dans l'EnvironmentFile ne peut pas en porter une seconde.
+CLE_API = re.compile(r"^sk-ant-api[A-Za-z0-9_-]{20,300}$")
+# Le jeton d'une session claude.ai (`sk-ant-oat…`) n'est PAS une clé : le poser ici serait
+# intermédier un identifiant claude.ai, ce qu'Anthropic interdit. Une session se connecte
+# par `/login`, par la personne elle-même.
+JETON_SESSION = "sk-ant-oat"
+AUTHS = ("key", "session")
+# Ce que `system/init` doit annoncer pour chaque mode. Le HOME du sandbox est à lui : un
+# `apiKeyHelper` dans ses réglages ferait payer autre chose que ce qui a été demandé.
+SOURCE_ATTENDUE = {"key": "ANTHROPIC_API_KEY", "session": "none"}
 
 BRIDES = [
     "MemoryMax=500M", "MemorySwapMax=0", "CPUQuota=80%", "TasksMax=64",
@@ -87,13 +112,26 @@ def unite_de_run(slug):
     return f"sandbox-run-{slug}.service"
 
 
-def dans_le_sandbox(slug, args, unite=None):
-    """Commande exécutée comme la personne, dans une unité éphémère bridée."""
+def fichier_cle(slug):
+    return CLES / slug
+
+
+def cle_presente(slug):
+    return fichier_cle(slug).is_file()
+
+
+def dans_le_sandbox(slug, args, unite=None, cle=False):
+    """Commande exécutée comme la personne, dans une unité éphémère bridée.
+
+    `cle` : la clé d'API du sandbox entre dans l'environnement de l'unité par
+    `EnvironmentFile=` — lu par systemd, jamais dans l'argv de `systemd-run`, que
+    tout utilisateur de la box peut lire dans /proc."""
     cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect",
            *([f"--unit={unite}"] if unite else []),
            f"--uid={utilisateur(slug)}", f"--gid={utilisateur(slug)}",
            f"--working-directory={home(slug)}",
            f"-p", f"ReadWritePaths={home(slug)}",
+           *(["-p", f"EnvironmentFile={fichier_cle(slug)}"] if cle else []),
            "-E", f"HOME={home(slug)}", "-E", "DISABLE_AUTOUPDATER=1",
            "-E", "PATH=/usr/bin:/bin"]
     for b in BRIDES:
@@ -103,12 +141,58 @@ def dans_le_sandbox(slug, args, unite=None):
 
 
 def etat(slug):
+    """La session, telle que le CLI la voit (sans la clé : `auth status` dirait la clé
+    et tairait la session) — et `apiKey`, le fait qu'une clé est posée."""
     p = dans_le_sandbox(slug, ["auth", "status"])
     sortie, _ = p.communicate(timeout=60)
     try:
-        return json.loads(sortie[sortie.index("{"):])
+        session = json.loads(sortie[sortie.index("{"):])
     except ValueError:
         raise Erreur(502, f"auth status illisible : {sortie[-300:]}")
+    session["apiKey"] = cle_presente(slug)
+    return session
+
+
+def ecrire_cle(slug, cle):
+    """Pose la clé d'API du sandbox : `CLES/<slug>`, root 0600, au format EnvironmentFile.
+    Le sandbox ne voit jamais ce fichier ; la clé n'entre que dans l'environnement du run.
+
+    Remplace une clé déjà posée. Ne touche pas à la session : les deux coexistent, et
+    c'est `auth` du run qui choisit."""
+    exige_sandbox(slug)
+    cle = (cle or "").strip()
+    if cle.startswith(JETON_SESSION):
+        raise Erreur(422, "ceci est le jeton d'une session claude.ai, pas une clé d'API — "
+                          "une session se connecte par /login")
+    if not CLE_API.fullmatch(cle):
+        raise Erreur(422, "clé d'API invalide : une clé de la Console Anthropic (sk-ant-api…) est attendue")
+    CLES.mkdir(mode=0o700, parents=True, exist_ok=True)
+    chemin = fichier_cle(slug)
+    provisoire = chemin.with_name(f".{slug}.{uuid.uuid4().hex}")
+    fd = os.open(provisoire, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"ANTHROPIC_API_KEY={cle}\n")
+    os.replace(provisoire, chemin)   # un run en vol lit l'ancienne ou la nouvelle, jamais un fichier tronqué
+    return etat(slug)
+
+
+def retirer_cle(slug):
+    exige_sandbox(slug)
+    fichier_cle(slug).unlink(missing_ok=True)
+    return etat(slug)
+
+
+def mode_auth(slug, demande):
+    """Ce que le run paiera. Tranché AVANT le flux : une fois les en-têtes partis, un
+    refus n'aurait plus de statut HTTP pour se dire."""
+    exige_sandbox(slug)
+    if demande is None:
+        return "session"
+    if demande not in AUTHS:
+        raise Erreur(400, f"auth inconnu : {demande!r} (key ou session)")
+    if demande == "key" and not cle_presente(slug):
+        raise Erreur(409, "aucune clé d'API posée dans ce sandbox")
+    return demande
 
 
 def creer(slug):
@@ -130,6 +214,7 @@ def creer(slug):
 def detruire(slug):
     exige_sandbox(slug)
     abandonner_connexion(slug)
+    fichier_cle(slug).unlink(missing_ok=True)   # hors du HOME : `userdel --remove` ne l'emporterait pas
     deconnexion = dans_le_sandbox(slug, ["auth", "logout"])
     deconnexion.communicate(timeout=60)
     # Un run encore en vol empêcherait userdel : la destruction l'emporte.
@@ -214,11 +299,12 @@ def ecrire_config_mcp(slug, mcp):
     return chemin
 
 
-def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
+def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="session"):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
     Avec `mcp` : les seuls outils du run sont ceux du relais (aucun outil intégré,
-    aucune config utilisateur). Libère le sandbox quoi qu'il arrive."""
+    aucune config utilisateur). `auth` est déjà tranché (`mode_auth`). Libère le
+    sandbox quoi qu'il arrive."""
     config, p = None, None
     try:
         debut = time.time()
@@ -229,7 +315,7 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
             config = ecrire_config_mcp(slug, mcp)
             args += ["--mcp-config", str(config), "--strict-mcp-config", "--tools", "",
                      "--allowedTools", "mcp__oto", "--permission-mode", "dontAsk"]
-        p = dans_le_sandbox(slug, args, unite=unite_de_run(slug))
+        p = dans_le_sandbox(slug, args, unite=unite_de_run(slug), cle=(auth == "key"))
         resultat, brut = None, ""
         for ligne in p.stdout:
             try:
@@ -237,15 +323,28 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None):
             except ValueError:
                 brut = ligne.strip() or brut     # stderr du CLI : gardé pour dire l'échec
                 continue
+            if ev.get("type") == "system" and ev.get("subtype") == "init":
+                source = ev.get("apiKeySource")
+                if source != SOURCE_ATTENDUE[auth]:
+                    subprocess.run(["systemctl", "stop", unite_de_run(slug)])
+                    p.wait(timeout=30)
+                    yield {"type": "ferme_resume", "duree_s": round(time.time() - debut, 1),
+                           "code": p.returncode, "auth": auth, "connecte": True,
+                           "erreur": f"auth_mismatch : run demandé en `{auth}`, le CLI "
+                                     f"annonce apiKeySource={source!r} — arrêté avant tout tour"}
+                    return
             if ev.get("type") == "result":
                 resultat = ev
             yield ev
         p.wait(timeout=30)
         resume = {"type": "ferme_resume", "duree_s": round(time.time() - debut, 1),
-                  "code": p.returncode}
+                  "code": p.returncode, "auth": auth}
         if resultat is None or resultat.get("is_error"):
-            # Un échec se QUALIFIE : sandbox déconnecté (→ needs_login) ou autre chose.
-            resume["connecte"] = bool(etat(slug).get("loggedIn"))
+            # Un échec se QUALIFIE : ce qui payait le run est-il encore là ? Session
+            # tombée (→ needs_login), clé retirée sous le run — ou autre chose. Une clé
+            # REFUSÉE par l'API reste « présente » : le refus est dans `erreur`.
+            resume["connecte"] = (cle_presente(slug) if auth == "key"
+                                  else bool(etat(slug).get("loggedIn")))
             resume["erreur"] = (resultat or {}).get("result") or brut or "flux sans résultat"
         yield resume
     finally:
@@ -270,6 +369,7 @@ def resume_du_run(evenements):
     limites = [e["rate_limit_info"] for e in evenements if e.get("type") == "rate_limit_event"]
     return {
         "duree_s": fin.get("duree_s"),
+        "auth": fin.get("auth"),
         "apiKeySource": init.get("apiKeySource"),
         "modele": init.get("model"),
         "resultat": resultat.get("result") or fin.get("erreur"),
@@ -298,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._repondre(200, PAGE.read_bytes(), "text/html; charset=utf-8")
         if self.headers.get("Authorization") != f"Bearer {JETON}":
             return self._repondre(401, {"erreur": "jeton manquant ou invalide"})
-        m = re.match(r"^/api/sandboxes/([^/]+)(/login|/login/code|/runs)?$", self.path)
+        m = re.match(r"^/api/sandboxes/([^/]+)(/login|/login/code|/key|/runs)?$", self.path)
         if not m:
             return self._repondre(404, {"erreur": "route inconnue"})
         slug, sous = m.groups()
@@ -308,6 +408,8 @@ class Handler(BaseHTTPRequestHandler):
             ("DELETE", None): lambda: detruire(slug),
             ("POST", "/login"): lambda: demarrer_connexion(slug, self._corps().get("email")),
             ("PUT", "/login/code"): lambda: transmettre_code(slug, self._corps()["code"]),
+            ("PUT", "/key"): lambda: ecrire_cle(slug, self._corps()["api_key"]),
+            ("DELETE", "/key"): lambda: retirer_cle(slug),
             ("POST", "/runs"): lambda: self._run(slug, self._corps()),
         }
         action = routes.get((methode, sous))
@@ -323,9 +425,10 @@ class Handler(BaseHTTPRequestHandler):
             self._repondre(400, {"erreur": f"requête invalide : {e}"})
 
     def _run(self, slug, c):
+        auth = mode_auth(slug, c.get("auth"))   # avant le verrou : un refus ne réserve rien
         verrou = reserver(slug)
         flux = flux_du_run(slug, verrou, c["prompt"], c.get("model", "sonnet"),
-                           system=c.get("system"), mcp=c.get("mcp"))
+                           system=c.get("system"), mcp=c.get("mcp"), auth=auth)
         if "application/x-ndjson" not in (self.headers.get("Accept") or ""):
             return resume_du_run(flux)
         # Le flux, au fil de l'eau : le worker prolonge son bail à chaque événement.
