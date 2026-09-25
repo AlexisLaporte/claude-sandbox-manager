@@ -172,5 +172,38 @@ class SourceConfirmeeParLeCli(Base):
         self.assertEqual(sortie[-1]["erreur"], "invalid x-api-key")
 
 
+class DureeDuRun(Base):
+    def argv(self, **kw):
+        with mock.patch.object(agent.subprocess, "Popen") as popen:
+            agent.dans_le_sandbox("bac", ["-p", "x"], **kw)
+        return popen.call_args.args[0]
+
+    def test_la_duree_demandee_passe_apres_les_brides(self):
+        argv = self.argv(duree=900)
+        valeurs = [argv[i + 1] for i, a in enumerate(argv) if a == "-p"
+                   and argv[i + 1].startswith("RuntimeMaxSec=")]
+        self.assertEqual(valeurs, ["RuntimeMaxSec=1800", "RuntimeMaxSec=900"])   # la dernière gagne
+
+    def test_sans_demande_les_brides_seules(self):
+        self.assertEqual(sum(a.startswith("RuntimeMaxSec=") for a in self.argv()), 1)
+
+    def test_la_demande_est_bornee(self):
+        self.assertIsNone(agent.duree_du_run(None))
+        self.assertEqual(agent.duree_du_run(10), 60)
+        self.assertEqual(agent.duree_du_run(7200), 3600)
+        self.assertEqual(agent.duree_du_run(1200), 1200)
+        for mauvaise in ("900", 9.5, True):
+            with self.subTest(mauvaise=mauvaise), self.assertRaises(agent.Erreur) as e:
+                agent.duree_du_run(mauvaise)
+            self.assertEqual(e.exception.statut, 400)
+
+    def test_le_run_recoit_sa_duree(self):
+        with mock.patch.object(agent, "dans_le_sandbox",
+                               return_value=FauxProcessus([init("none"), RESULTAT])) as sb, \
+                mock.patch.object(agent.subprocess, "run"):
+            list(agent.flux_du_run("bac", mock.Mock(), "p", "sonnet", duree=1200))
+        self.assertEqual(sb.call_args.kwargs["duree"], 1200)
+
+
 if __name__ == "__main__":
     unittest.main()

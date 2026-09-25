@@ -74,6 +74,10 @@ BRIDES = [
     "InaccessiblePaths=-/opt -/etc/ferme -/etc/oto-runner -/var/lib/postgresql",
     "RuntimeMaxSec=1800",   # un run qui ne rend jamais la main ne tient pas le sandbox indéfiniment
 ]
+# La durée qu'un run peut DEMANDER (`max_seconds`, déclarée sur l'agent) : de 60 s à une
+# heure, la borne d'oto-backend. Sans demande, les 1800 s des brides. Au-delà d'une
+# heure, c'est une question de capacité de la box, pas un réglage.
+DUREE_RUN_MIN_S, DUREE_RUN_MAX_S = 60, 3600
 
 ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
@@ -120,7 +124,16 @@ def cle_presente(slug):
     return fichier_cle(slug).is_file()
 
 
-def dans_le_sandbox(slug, args, unite=None, cle=False):
+def duree_du_run(demande):
+    """`RuntimeMaxSec` de l'unité du run : la durée demandée, bornée — ou None (brides)."""
+    if demande is None:
+        return None
+    if isinstance(demande, bool) or not isinstance(demande, int):
+        raise Erreur(400, f"max_seconds invalide : {demande!r} (un entier de secondes)")
+    return max(DUREE_RUN_MIN_S, min(demande, DUREE_RUN_MAX_S))
+
+
+def dans_le_sandbox(slug, args, unite=None, cle=False, duree=None):
     """Commande exécutée comme la personne, dans une unité éphémère bridée.
 
     `cle` : la clé d'API du sandbox entre dans l'environnement de l'unité par
@@ -136,6 +149,9 @@ def dans_le_sandbox(slug, args, unite=None, cle=False):
            "-E", "PATH=/usr/bin:/bin"]
     for b in BRIDES:
         cmd += ["-p", b]
+    if duree is not None:
+        # APRÈS les brides : pour une même propriété, la dernière affectation gagne.
+        cmd += ["-p", f"RuntimeMaxSec={duree}"]
     return subprocess.Popen(cmd + [CLAUDE, *args], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
@@ -299,7 +315,8 @@ def ecrire_config_mcp(slug, mcp):
     return chemin
 
 
-def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="session"):
+def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="session",
+                duree=None):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
     Avec `mcp` : les seuls outils du run sont ceux du relais (aucun outil intégré,
@@ -315,7 +332,8 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="sessi
             config = ecrire_config_mcp(slug, mcp)
             args += ["--mcp-config", str(config), "--strict-mcp-config", "--tools", "",
                      "--allowedTools", "mcp__oto", "--permission-mode", "dontAsk"]
-        p = dans_le_sandbox(slug, args, unite=unite_de_run(slug), cle=(auth == "key"))
+        p = dans_le_sandbox(slug, args, unite=unite_de_run(slug), cle=(auth == "key"),
+                            duree=duree)
         resultat, brut = None, ""
         for ligne in p.stdout:
             try:
@@ -426,9 +444,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run(self, slug, c):
         auth = mode_auth(slug, c.get("auth"))   # avant le verrou : un refus ne réserve rien
+        duree = duree_du_run(c.get("max_seconds"))
         verrou = reserver(slug)
         flux = flux_du_run(slug, verrou, c["prompt"], c.get("model", "sonnet"),
-                           system=c.get("system"), mcp=c.get("mcp"), auth=auth)
+                           system=c.get("system"), mcp=c.get("mcp"), auth=auth, duree=duree)
         if "application/x-ndjson" not in (self.headers.get("Accept") or ""):
             return resume_du_run(flux)
         # Le flux, au fil de l'eau : le worker prolonge son bail à chaque événement.

@@ -46,7 +46,7 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 | PUT | `/api/sandboxes/{slug}/login/code` | transmet le code → état |
 | PUT | `/api/sandboxes/{slug}/key` | pose (ou remplace) une clé d'API `{api_key}` → état |
 | DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
-| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` |
+| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, max_seconds?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` |
 
 `mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors AUCUN outil intégré, seulement
 ceux du relais MCP d'oto-runner (`oto_runner.relais_mcp`), lancé dans le sandbox par le CLI. Le relais pose
@@ -78,6 +78,11 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
 - **Pour les consommateurs** : un sandbox à clé seule répond `loggedIn: false` — lire `apiKey`, pas
   seulement `loggedIn`, avant de conclure qu'il faut se reconnecter.
 - Un run à la fois par sandbox, clé comprise (même unité `sandbox-run-<slug>`).
+
+**Durée d'un run** : `max_seconds` (la durée déclarée sur l'agent, oto-backend) devient le
+`RuntimeMaxSec` de l'unité, borné à 60–3600 s ; sans lui, les 1800 s des brides. Le worker
+tient la même échéance sur le flux et ferme la connexion quand elle tombe — ce qui arrête
+déjà l'unité (le `finally` du flux) : la durée de l'unité est le filet, pas le geste.
 
 Tests hors box : `python3 -m unittest discover -s tests -p 'test_*.py'`. **À vérifier sur la box** avant
 usage : `systemd-run -p EnvironmentFile=…` accepté pour une unité éphémère et lu malgré
