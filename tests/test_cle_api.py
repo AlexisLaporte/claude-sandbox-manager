@@ -304,5 +304,50 @@ class CleRemiseAvecLeRun(Base):
         self.assertNotIn("--effort", vu["args"])
 
 
+
+class RienNeFuit(Base):
+    """Une place de la box et une copie de clé ne survivent jamais à leur run."""
+
+    def _handler(self, casse):
+        h = agent.Handler.__new__(agent.Handler)
+        h.headers = {"Accept": "application/x-ndjson"}
+
+        def boum(*a, **k):
+            raise BrokenPipeError("client parti")
+        h.send_response = boum if casse == "entetes" else (lambda *a, **k: None)
+        h.send_header = lambda *a, **k: None
+        h.end_headers = lambda *a, **k: None
+        h.wfile = mock.Mock(write=boum if casse == "ecriture" else mock.Mock(), flush=mock.Mock())
+        return h
+
+    def _essai(self, casse):
+        corps = {"prompt": "p", "auth": "key", "api_key": CLE}
+        with mock.patch.object(agent, "dans_le_sandbox",
+                               return_value=FauxProcessus([init("ANTHROPIC_API_KEY"), RESULTAT])), \
+                mock.patch.object(agent.subprocess, "run"), self.assertRaises(BrokenPipeError):
+            self._handler(casse)._run("bac", corps)
+        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        self.assertEqual([f for f in agent.CLES.iterdir() if ".run-" in f.name], [],
+                         "la clé du run est restée sur le disque")
+
+    def test_client_parti_avant_le_premier_octet(self):
+        self._essai("entetes")
+
+    def test_ecriture_qui_casse_en_vol(self):
+        self._essai("ecriture")
+
+    def test_le_demarrage_efface_les_restes_d_un_arret_en_plein_run(self):
+        reste_cle = agent.CLES / "bac.run-abc"
+        agent.CLES.mkdir(parents=True, exist_ok=True)
+        reste_cle.write_text("ANTHROPIC_API_KEY=x\n")
+        agent.ecrire_cle("bac", CLE)                      # une clé STOCKÉE, elle, reste
+        reste_config = agent.home("bac") / ".ferme-runs" / "abc"
+        reste_config.mkdir(parents=True)
+        agent.nettoyer_restes()
+        self.assertFalse(reste_cle.exists())
+        self.assertFalse(reste_config.exists())
+        self.assertTrue(agent.cle_presente("bac"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -331,6 +331,7 @@ class Run:
     def __init__(self, slug, auth, cle_du_run=None, workspace=None):
         self.slug, self.auth = slug, auth
         self.verrou = self.env = self.config = self.env_du_run = None
+        self.libere = False
         self.ident = uuid.uuid4().hex[:12]
         if not places.acquire(blocking=False):
             raise Erreur(429, f"la ferme tient déjà {RUNS_MAX} runs — réessaie plus tard")
@@ -358,6 +359,10 @@ class Run:
             raise
 
     def liberer(self):
+        """Rend tout — une fois : l'appelant ET le flux l'appellent, le second ne fait rien."""
+        if self.libere:
+            return
+        self.libere = True
         if self.env_du_run is not None:
             self.env_du_run.unlink(missing_ok=True)
         if self.config is not None:
@@ -538,17 +543,25 @@ class Handler(BaseHTTPRequestHandler):
         flux = flux_du_run(slug, run, c["prompt"], c.get("model", "sonnet"),
                            system=c.get("system"), mcp=c.get("mcp"), duree=duree,
                            effort=effort)
-        if "application/x-ndjson" not in (self.headers.get("Accept") or ""):
-            return resume_du_run(flux)
-        # Le flux, au fil de l'eau : le worker prolonge son bail à chaque événement.
-        # HTTP/1.0 sans longueur : la fin du flux est la fermeture de la connexion.
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.end_headers()
-        for ev in flux:
-            self.wfile.write(json.dumps(ev, ensure_ascii=False).encode() + b"\n")
-            self.wfile.flush()
-        return ENVOYE
+        try:
+            if "application/x-ndjson" not in (self.headers.get("Accept") or ""):
+                return resume_du_run(flux)
+            # Le flux, au fil de l'eau : le worker prolonge son bail à chaque événement.
+            # HTTP/1.0 sans longueur : la fin du flux est la fermeture de la connexion.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            for ev in flux:
+                self.wfile.write(json.dumps(ev, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+            return ENVOYE
+        finally:
+            # Quoi qu'il arrive — client parti avant le premier octet, écriture qui casse
+            # en vol : le flux s'arrête (son `finally` arrête l'unité), et le run rend
+            # sa place, sa clé, sa config. Un flux jamais démarré n'a pas de `finally`
+            # à lui : sans ceci, la place était perdue et la clé restait sur le disque.
+            flux.close()
+            run.liberer()
 
     def do_GET(self):
         self._router("GET")
@@ -563,5 +576,21 @@ class Handler(BaseHTTPRequestHandler):
         self._router("DELETE")
 
 
+def nettoyer_restes():
+    """Au démarrage : ce qu'un arrêt en plein run a laissé — les clés remises avec un run
+    (`CLES/*.run-*`) et les configs de run (`<sandbox>/.ferme-runs/*`). Un redémarrage
+    saute les `finally` des fils du serveur : sans ce ménage, chaque déploiement en pleine
+    charge laisserait une copie de clé d'org sur la box."""
+    if CLES.is_dir():
+        for f in CLES.iterdir():
+            if ".run-" in f.name:
+                f.unlink(missing_ok=True)
+    if RACINE.is_dir():
+        for runs in RACINE.glob("*/.ferme-runs"):
+            for d in runs.iterdir():
+                shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
+    nettoyer_restes()
     ThreadingHTTPServer((HOTE, PORT), Handler).serve_forever()
