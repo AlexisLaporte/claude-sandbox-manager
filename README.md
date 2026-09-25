@@ -66,15 +66,15 @@ Notre instance : box `box-agents` (DEV1-S, IP privée `10.0.0.2`), backend `mcp.
 ## Feuille de route (décidée par Alexis, 25/09/2026)
 
 Le service tournera **chez client, après la bascule** sur son Scaleway ; box-agents reste d'ici là notre banc de
-test (vous trois seulement). Julien et un collègue seront prévenus du **risque de suspension** des comptes
-Claude (clients et eux-mêmes) une fois ces évolutions faites.
+test (vous trois seulement). Les quatre évolutions sont livrées (25/09/2026) ; **client fait les tests**, et
+Julien et un collègue ont été prévenus du **risque de suspension** des comptes Claude (clients et eux-mêmes).
 
 1. ~~Secrets hors des scripts~~ : lus au démarrage dans le Secret Manager (`deploy/secrets.sh`).
 2. ~~Historique en direct~~ : chaque message du CLI apposé au fil du run (`run_messages`) à son arrivée (oto-runner#26).
-3. **Plafond de consommation** : jamais au-delà de x % de l'usage **total** du compte (fenêtres 5 h et 7 j,
+3. ~~Plafond de consommation~~ (backend v1.369.0, dashboard v1.106.0) : jamais au-delà de x % de l'usage **total** du compte (fenêtres 5 h et 7 j,
    usage perso compris). x réglé par l'org, chacun peut descendre plus bas pour son compte (le plus strict
    gagne). Au seuil, le run en cours **finit**, les suivants **attendent** la réinitialisation.
-4. **Pool d'org** : mode perso ou pool réglé **par org** ; prêt de son abonnement **opt-in explicite** par
+4. ~~Pool d'org~~ (backend v1.370.0, dashboard v1.107.0) : mode perso ou pool réglé **par org** ; prêt de son abonnement **opt-in explicite** par
    membre ; en mode pool, les flottes peuvent y tourner. Box agrandie plus tard, sur mesure.
 
 ## Ce qui manque pour un produit
