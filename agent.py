@@ -27,6 +27,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -78,11 +79,22 @@ BRIDES = [
 # heure, la borne d'oto-backend. Sans demande, les 1800 s des brides. Au-delà d'une
 # heure, c'est une question de capacité de la box, pas un réglage.
 DUREE_RUN_MIN_S, DUREE_RUN_MAX_S = 60, 3600
+# Les runs EN VOL sur toute la box, tous sandboxes confondus : au-delà, 429. Les brides
+# donnent 500 Mo à chaque run ; la box en tient ce nombre-là, pas un de plus.
+RUNS_MAX = int(os.environ.get("FERME_RUNS_MAX", "3"))
+# Le workspace d'une clé d'ORGANISATION Anthropic : sans lui, toute requête faite avec
+# cette clé est refusée. Il part en en-tête (`ANTHROPIC_CUSTOM_HEADERS`) — une ligne, donc
+# une forme fermée, pour la même raison que la clé.
+WORKSPACE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+# L'effort que le CLI sait recevoir (`--effort`). `none` est une valeur du catalogue
+# d'oto (un modèle qui ne raisonne pas) : elle ne part pas.
+EFFORT = re.compile(r"^[a-z]{2,12}$")
 
 ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
-verrous = {}     # slug -> Lock : un run à la fois par sandbox
+verrous = {}     # slug -> Lock : un run de SESSION à la fois par sandbox
 verrou_global = threading.Lock()
+places = threading.BoundedSemaphore(RUNS_MAX)   # runs en vol sur la box
 
 
 class Erreur(Exception):
@@ -133,18 +145,20 @@ def duree_du_run(demande):
     return max(DUREE_RUN_MIN_S, min(demande, DUREE_RUN_MAX_S))
 
 
-def dans_le_sandbox(slug, args, unite=None, cle=False, duree=None):
+def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None):
     """Commande exécutée comme la personne, dans une unité éphémère bridée.
 
-    `cle` : la clé d'API du sandbox entre dans l'environnement de l'unité par
-    `EnvironmentFile=` — lu par systemd, jamais dans l'argv de `systemd-run`, que
-    tout utilisateur de la box peut lire dans /proc."""
+    `env` : un fichier de `CLES` (la clé d'API, le workspace) qui entre dans
+    l'environnement de l'unité par `EnvironmentFile=` — lu par systemd, jamais dans
+    l'argv de `systemd-run`, que tout utilisateur de la box peut lire dans /proc.
+    `config` : un `CLAUDE_CONFIG_DIR` propre au run (runs par clé, cf. `Run`)."""
     cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect",
            *([f"--unit={unite}"] if unite else []),
            f"--uid={utilisateur(slug)}", f"--gid={utilisateur(slug)}",
            f"--working-directory={home(slug)}",
            f"-p", f"ReadWritePaths={home(slug)}",
-           *(["-p", f"EnvironmentFile={fichier_cle(slug)}"] if cle else []),
+           *(["-p", f"EnvironmentFile={env}"] if env else []),
+           *(["-E", f"CLAUDE_CONFIG_DIR={config}"] if config else []),
            "-E", f"HOME={home(slug)}", "-E", "DISABLE_AUTOUPDATER=1",
            "-E", "PATH=/usr/bin:/bin"]
     for b in BRIDES:
@@ -176,20 +190,32 @@ def ecrire_cle(slug, cle):
     Remplace une clé déjà posée. Ne touche pas à la session : les deux coexistent, et
     c'est `auth` du run qui choisit."""
     exige_sandbox(slug)
+    ecrire_env(fichier_cle(slug), cle)
+    return etat(slug)
+
+
+def ecrire_env(chemin, cle, workspace=None):
+    """Un fichier d'environnement de `CLES` : la clé d'API (et le workspace), root 0600.
+
+    Posé à côté puis renommé : un run en vol lit l'ancien ou le nouveau, jamais un
+    fichier tronqué. La FORME de chaque valeur est vérifiée — c'est aussi ce qui garantit
+    qu'une valeur ne peut pas porter une seconde ligne."""
     cle = (cle or "").strip()
     if cle.startswith(JETON_SESSION):
         raise Erreur(422, "ceci est le jeton d'une session claude.ai, pas une clé d'API — "
                           "une session se connecte par /login")
     if not CLE_API.fullmatch(cle):
         raise Erreur(422, "clé d'API invalide : une clé de la Console Anthropic (sk-ant-api…) est attendue")
+    if workspace is not None and not WORKSPACE.fullmatch(workspace):
+        raise Erreur(422, "workspace invalide")
     CLES.mkdir(mode=0o700, parents=True, exist_ok=True)
-    chemin = fichier_cle(slug)
-    provisoire = chemin.with_name(f".{slug}.{uuid.uuid4().hex}")
+    provisoire = chemin.with_name(f".{chemin.name}.{uuid.uuid4().hex}")
     fd = os.open(provisoire, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(f"ANTHROPIC_API_KEY={cle}\n")
-    os.replace(provisoire, chemin)   # un run en vol lit l'ancienne ou la nouvelle, jamais un fichier tronqué
-    return etat(slug)
+        if workspace:
+            f.write(f"ANTHROPIC_CUSTOM_HEADERS=anthropic-workspace-id: {workspace}\n")
+    os.replace(provisoire, chemin)
 
 
 def retirer_cle(slug):
@@ -198,16 +224,21 @@ def retirer_cle(slug):
     return etat(slug)
 
 
-def mode_auth(slug, demande):
+def mode_auth(slug, demande, cle_du_run=None):
     """Ce que le run paiera. Tranché AVANT le flux : une fois les en-têtes partis, un
-    refus n'aurait plus de statut HTTP pour se dire."""
+    refus n'aurait plus de statut HTTP pour se dire. `cle_du_run` : une clé remise avec
+    CE run (elle ne vaut que pour lui) — elle exige `auth: "key"`, dite."""
     exige_sandbox(slug)
     if demande is None:
+        if cle_du_run:
+            raise Erreur(400, "une clé remise avec le run exige `auth: \"key\"`")
         return "session"
     if demande not in AUTHS:
         raise Erreur(400, f"auth inconnu : {demande!r} (key ou session)")
-    if demande == "key" and not cle_presente(slug):
-        raise Erreur(409, "aucune clé d'API posée dans ce sandbox")
+    if demande == "session" and cle_du_run:
+        raise Erreur(400, "une clé remise avec le run exige `auth: \"key\"`")
+    if demande == "key" and not cle_du_run and not cle_presente(slug):
+        raise Erreur(409, "aucune clé d'API posée dans ce sandbox, ni remise avec le run")
     return demande
 
 
@@ -285,6 +316,58 @@ def transmettre_code(slug, code):
     return etat(slug)
 
 
+class Run:
+    """Ce qu'UN run tient, et ce qu'il rend à sa fin — quoi qu'il arrive.
+
+    - **session** : le verrou du sandbox (deux rafraîchissements du jeton OAuth, chacun
+      faisant tourner le refresh token, casseraient la session) et l'unité fixe
+      `sandbox-run-<slug>`. Un à la fois, comme avant.
+    - **clé** : aucun rafraîchissement, donc aucun verrou. Plusieurs runs par sandbox, chacun
+      avec SON unité (`sandbox-run-<slug>-<id>`), SON `CLAUDE_CONFIG_DIR` (deux CLI ne se
+      partagent pas un état) et, si la clé est remise avec le run, SON fichier de clé,
+      effacé à la fin : aucune copie ne reste sur la box.
+    - une PLACE sur la box, quel que soit le mode (`RUNS_MAX`)."""
+
+    def __init__(self, slug, auth, cle_du_run=None, workspace=None):
+        self.slug, self.auth = slug, auth
+        self.verrou = self.env = self.config = self.env_du_run = None
+        self.ident = uuid.uuid4().hex[:12]
+        if not places.acquire(blocking=False):
+            raise Erreur(429, f"la ferme tient déjà {RUNS_MAX} runs — réessaie plus tard")
+        try:
+            if auth == "session":
+                self.verrou = reserver(slug)
+                self.unite = unite_de_run(slug)
+                return
+            self.unite = f"sandbox-run-{slug}-{self.ident}.service"
+            if cle_du_run:
+                self.env_du_run = CLES / f"{slug}.run-{self.ident}"
+                ecrire_env(self.env_du_run, cle_du_run, workspace)
+                self.env = self.env_du_run
+            else:
+                if workspace:
+                    raise Erreur(400, "`workspace` accompagne une clé remise avec le run")
+                self.env = fichier_cle(slug)
+            self.config = home(slug) / ".ferme-runs" / self.ident
+            compte = pwd.getpwnam(utilisateur(slug))
+            for d in (self.config.parent, self.config):
+                d.mkdir(mode=0o700, exist_ok=True)
+                os.chown(d, compte.pw_uid, compte.pw_gid)
+        except BaseException:
+            self.liberer()
+            raise
+
+    def liberer(self):
+        if self.env_du_run is not None:
+            self.env_du_run.unlink(missing_ok=True)
+        if self.config is not None:
+            shutil.rmtree(self.config, ignore_errors=True)
+        if self.verrou is not None:
+            self.verrou.release()
+            self.verrou = None
+        places.release()
+
+
 def reserver(slug):
     """Un run à la fois par sandbox : deux rafraîchissements simultanés du jeton OAuth,
     chacun faisant tourner le refresh token, casseraient la session."""
@@ -315,25 +398,27 @@ def ecrire_config_mcp(slug, mcp):
     return chemin
 
 
-def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="session",
-                duree=None):
+def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, effort=None):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
     Avec `mcp` : les seuls outils du run sont ceux du relais (aucun outil intégré,
-    aucune config utilisateur). `auth` est déjà tranché (`mode_auth`). Libère le
-    sandbox quoi qu'il arrive."""
+    aucune config utilisateur). `run` tient ce que le run a réservé (`Run`) ; tout est
+    rendu quoi qu'il arrive."""
+    auth, unite = run.auth, run.unite
     config, p = None, None
     try:
         debut = time.time()
         args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--model", modele]
         if system:
             args += ["--system-prompt", system]
+        if effort and effort != "none":
+            args += ["--effort", effort]
         if mcp is not None:
             config = ecrire_config_mcp(slug, mcp)
             args += ["--mcp-config", str(config), "--strict-mcp-config", "--tools", "",
                      "--allowedTools", "mcp__oto", "--permission-mode", "dontAsk"]
-        p = dans_le_sandbox(slug, args, unite=unite_de_run(slug), cle=(auth == "key"),
-                            duree=duree)
+        p = dans_le_sandbox(slug, args, unite=unite, env=run.env, duree=duree,
+                            config=run.config)
         resultat, brut = None, ""
         for ligne in p.stdout:
             try:
@@ -344,7 +429,7 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="sessi
             if ev.get("type") == "system" and ev.get("subtype") == "init":
                 source = ev.get("apiKeySource")
                 if source != SOURCE_ATTENDUE[auth]:
-                    subprocess.run(["systemctl", "stop", unite_de_run(slug)])
+                    subprocess.run(["systemctl", "stop", unite])
                     p.wait(timeout=30)
                     yield {"type": "ferme_resume", "duree_s": round(time.time() - debut, 1),
                            "code": p.returncode, "auth": auth, "connecte": True,
@@ -361,8 +446,8 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="sessi
             # Un échec se QUALIFIE : ce qui payait le run est-il encore là ? Session
             # tombée (→ needs_login), clé retirée sous le run — ou autre chose. Une clé
             # REFUSÉE par l'API reste « présente » : le refus est dans `erreur`.
-            resume["connecte"] = (cle_presente(slug) if auth == "key"
-                                  else bool(etat(slug).get("loggedIn")))
+            resume["connecte"] = ((run.env_du_run is not None or cle_presente(slug))
+                                  if auth == "key" else bool(etat(slug).get("loggedIn")))
             resume["erreur"] = (resultat or {}).get("result") or brut or "flux sans résultat"
         yield resume
     finally:
@@ -371,11 +456,11 @@ def flux_du_run(slug, verrou, prompt, modele, system=None, mcp=None, auth="sessi
         # y partir sur la même session. On arrête l'UNITÉ — tuer le client
         # systemd-run ne suffit pas.
         if p is not None and p.poll() is None:
-            subprocess.run(["systemctl", "stop", unite_de_run(slug)])
+            subprocess.run(["systemctl", "stop", unite])
             p.wait(timeout=30)
         if config is not None:
             config.unlink(missing_ok=True)
-        verrou.release()
+        run.liberer()
 
 
 def resume_du_run(evenements):
@@ -443,11 +528,16 @@ class Handler(BaseHTTPRequestHandler):
             self._repondre(400, {"erreur": f"requête invalide : {e}"})
 
     def _run(self, slug, c):
-        auth = mode_auth(slug, c.get("auth"))   # avant le verrou : un refus ne réserve rien
+        # Tout ce qui se refuse se refuse AVANT de réserver : un refus ne réserve rien.
+        auth = mode_auth(slug, c.get("auth"), c.get("api_key"))
         duree = duree_du_run(c.get("max_seconds"))
-        verrou = reserver(slug)
-        flux = flux_du_run(slug, verrou, c["prompt"], c.get("model", "sonnet"),
-                           system=c.get("system"), mcp=c.get("mcp"), auth=auth, duree=duree)
+        effort = c.get("effort")
+        if effort is not None and not EFFORT.fullmatch(str(effort)):
+            raise Erreur(400, f"effort invalide : {effort!r}")
+        run = Run(slug, auth, cle_du_run=c.get("api_key"), workspace=c.get("workspace"))
+        flux = flux_du_run(slug, run, c["prompt"], c.get("model", "sonnet"),
+                           system=c.get("system"), mcp=c.get("mcp"), duree=duree,
+                           effort=effort)
         if "application/x-ndjson" not in (self.headers.get("Accept") or ""):
             return resume_du_run(flux)
         # Le flux, au fil de l'eau : le worker prolonge son bail à chaque événement.

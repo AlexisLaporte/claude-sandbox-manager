@@ -57,6 +57,7 @@ class Base(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         agent.fichier_cle("bac").unlink(missing_ok=True)
+        agent.home("bac").mkdir(parents=True, exist_ok=True)
 
 
 class ArgvSansCle(Base):
@@ -68,11 +69,12 @@ class ArgvSansCle(Base):
     def test_la_cle_n_est_servie_que_demandee(self):
         agent.ecrire_cle("bac", CLE)
         self.assertNotIn(f"EnvironmentFile={agent.fichier_cle('bac')}", self.argv())
-        self.assertIn(f"EnvironmentFile={agent.fichier_cle('bac')}", self.argv(cle=True))
+        self.assertIn(f"EnvironmentFile={agent.fichier_cle('bac')}",
+                      self.argv(env=agent.fichier_cle("bac")))
 
     def test_la_cle_ne_passe_jamais_par_l_argv(self):
         agent.ecrire_cle("bac", CLE)
-        for kw in ({}, {"cle": True}):
+        for kw in ({}, {"env": agent.fichier_cle("bac")}):
             self.assertFalse(any(CLE in a for a in self.argv(**kw)), kw)
 
 
@@ -131,25 +133,26 @@ class ModeDuRun(Base):
 
 
 class SourceConfirmeeParLeCli(Base):
-    def run_(self, auth, evenements):
-        verrou = mock.Mock()
+    def run_(self, auth, evenements, **kw):
+        r = agent.Run("bac", auth, **kw)
+        self.dernier = r
         with mock.patch.object(agent, "dans_le_sandbox", return_value=FauxProcessus(evenements)) as sb, \
                 mock.patch.object(agent.subprocess, "run") as run:
-            sortie = list(agent.flux_du_run("bac", verrou, "p", "sonnet", auth=auth))
-        verrou.release.assert_called_once()
+            sortie = list(agent.flux_du_run("bac", r, "p", "sonnet"))
+        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place n'a pas été rendue")
         return sortie, sb, run
 
     def test_run_par_cle_confirme(self):
         agent.ecrire_cle("bac", CLE)
         sortie, sb, run = self.run_("key", [init("ANTHROPIC_API_KEY"), RESULTAT])
-        self.assertTrue(sb.call_args.kwargs["cle"])
+        self.assertEqual(sb.call_args.kwargs["env"], agent.fichier_cle("bac"))
         self.assertEqual(sortie[-1]["auth"], "key")
         self.assertNotIn("erreur", sortie[-1])
         run.assert_not_called()
 
     def test_run_par_session_confirme(self):
         sortie, sb, _ = self.run_("session", [init("none"), RESULTAT])
-        self.assertFalse(sb.call_args.kwargs["cle"])
+        self.assertIsNone(sb.call_args.kwargs["env"])
         self.assertNotIn("erreur", sortie[-1])
 
     def test_cle_demandee_mais_le_cli_paie_par_session(self):
@@ -157,7 +160,7 @@ class SourceConfirmeeParLeCli(Base):
         sortie, _, run = self.run_("key", [init("none"), RESULTAT])
         self.assertTrue(sortie[-1]["erreur"].startswith("auth_mismatch"))
         self.assertNotIn(RESULTAT, sortie)   # rien du run n'a filé après init
-        run.assert_called_once_with(["systemctl", "stop", agent.unite_de_run("bac")])
+        run.assert_called_once_with(["systemctl", "stop", self.dernier.unite])
 
     def test_session_demandee_mais_un_apikeyhelper_paie(self):
         sortie, _, run = self.run_("session", [init("apiKeyHelper"), RESULTAT])
@@ -201,8 +204,104 @@ class DureeDuRun(Base):
         with mock.patch.object(agent, "dans_le_sandbox",
                                return_value=FauxProcessus([init("none"), RESULTAT])) as sb, \
                 mock.patch.object(agent.subprocess, "run"):
-            list(agent.flux_du_run("bac", mock.Mock(), "p", "sonnet", duree=1200))
+            list(agent.flux_du_run("bac", agent.Run("bac", "session"), "p", "sonnet", duree=1200))
         self.assertEqual(sb.call_args.kwargs["duree"], 1200)
+
+
+
+class CleRemiseAvecLeRun(Base):
+    """La clé de l'ORG, remise à chaque run par le worker : aucune copie ne reste."""
+
+    def lancer(self, evenements, **kw):
+        effort = kw.pop("effort", None)
+        r = agent.Run("bac", "key", **kw)
+        vu = {}
+
+        def sandbox(slug, args, **k):
+            vu.update(k, args=args, contenu=k["env"].read_text() if k.get("env") else None,
+                      config_existe=bool(k.get("config")) and k["config"].is_dir())
+            return FauxProcessus(evenements)
+        with mock.patch.object(agent, "dans_le_sandbox", side_effect=sandbox), \
+                mock.patch.object(agent.subprocess, "run"):
+            sortie = list(agent.flux_du_run("bac", r, "p", "sonnet", effort=effort))
+        return r, vu, sortie
+
+    def test_la_cle_du_run_vit_le_temps_du_run(self):
+        r, vu, sortie = self.lancer([init("ANTHROPIC_API_KEY"), RESULTAT], cle_du_run=CLE,
+                                    workspace="wrkspc_01")
+        self.assertEqual(vu["contenu"], f"ANTHROPIC_API_KEY={CLE}\n"
+                         "ANTHROPIC_CUSTOM_HEADERS=anthropic-workspace-id: wrkspc_01\n")
+        self.assertNotIn(agent.RACINE, vu["env"].parents)          # hors du sandbox
+        self.assertFalse(vu["env"].exists(), "la clé du run doit être effacée à la fin")
+        self.assertTrue(vu["config_existe"])
+        self.assertFalse(vu["config"].exists(), "la config du run doit être effacée à la fin")
+        self.assertNotIn("erreur", sortie[-1])
+        self.assertFalse(agent.cle_presente("bac"), "une clé du run n'est jamais stockée")
+
+    def test_la_cle_du_run_ne_passe_jamais_par_l_argv(self):
+        r = agent.Run("bac", "key", cle_du_run=CLE)
+        try:
+            with mock.patch.object(agent.subprocess, "Popen") as popen:
+                agent.dans_le_sandbox("bac", ["-p", "x"], unite=r.unite, env=r.env, config=r.config)
+            self.assertFalse(any(CLE in a for a in popen.call_args.args[0]))
+        finally:
+            r.liberer()
+
+    def test_les_runs_par_cle_tournent_en_parallele_chacun_dans_son_unite(self):
+        a = agent.Run("bac", "key", cle_du_run=CLE)
+        b = agent.Run("bac", "key", cle_du_run=CLE)
+        try:
+            self.assertNotEqual(a.unite, b.unite)
+            self.assertNotEqual(a.config, b.config)
+            self.assertNotEqual(a.env, b.env)
+        finally:
+            a.liberer(); b.liberer()
+
+    def test_la_session_reste_un_run_a_la_fois(self):
+        a = agent.Run("bac", "session")
+        try:
+            with self.assertRaises(agent.Erreur) as e:
+                agent.Run("bac", "session")
+            self.assertEqual(e.exception.statut, 409)
+            agent.Run("bac", "key", cle_du_run=CLE).liberer()   # une clé ne l'attend pas
+        finally:
+            a.liberer()
+
+    def test_la_box_refuse_au_dela_de_ses_places(self):
+        tenus = [agent.Run("bac", "key", cle_du_run=CLE) for _ in range(agent.RUNS_MAX)]
+        try:
+            with self.assertRaises(agent.Erreur) as e:
+                agent.Run("bac", "key", cle_du_run=CLE)
+            self.assertEqual(e.exception.statut, 429)
+        finally:
+            for t in tenus:
+                t.liberer()
+        agent.Run("bac", "key", cle_du_run=CLE).liberer()           # les places sont revenues
+        self.assertEqual(agent.places._value, agent.RUNS_MAX)
+
+    def test_un_refus_a_la_reservation_ne_garde_rien(self):
+        with self.assertRaises(agent.Erreur):
+            agent.Run("bac", "key", cle_du_run="sk-ant-oat01-" + "x" * 40)
+        self.assertEqual(agent.places._value, agent.RUNS_MAX)
+        self.assertEqual([p for p in agent.CLES.iterdir() if ".run-" in p.name], [])
+        with self.assertRaises(agent.Erreur) as e:
+            agent.Run("bac", "key", cle_du_run=CLE, workspace="a b")
+        self.assertEqual(e.exception.statut, 422)
+        self.assertEqual(agent.places._value, agent.RUNS_MAX)
+
+    def test_le_mode_de_la_cle_du_run(self):
+        self.assertEqual(agent.mode_auth("bac", "key", CLE), "key")   # sans clé stockée
+        for demande in (None, "session"):
+            with self.subTest(demande=demande), self.assertRaises(agent.Erreur) as e:
+                agent.mode_auth("bac", demande, CLE)
+            self.assertEqual(e.exception.statut, 400)
+
+    def test_l_effort_part_sauf_none(self):
+        _, vu, _ = self.lancer([init("ANTHROPIC_API_KEY"), RESULTAT], cle_du_run=CLE, effort="high")
+        self.assertIn("--effort", vu["args"])
+        self.assertEqual(vu["args"][vu["args"].index("--effort") + 1], "high")
+        _, vu, _ = self.lancer([init("ANTHROPIC_API_KEY"), RESULTAT], cle_du_run=CLE, effort="none")
+        self.assertNotIn("--effort", vu["args"])
 
 
 if __name__ == "__main__":

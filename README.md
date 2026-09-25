@@ -46,7 +46,7 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 | PUT | `/api/sandboxes/{slug}/login/code` | transmet le code → état |
 | PUT | `/api/sandboxes/{slug}/key` | pose (ou remplace) une clé d'API `{api_key}` → état |
 | DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
-| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, max_seconds?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` |
+| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine |
 
 `mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors AUCUN outil intégré, seulement
 ceux du relais MCP d'oto-runner (`oto_runner.relais_mcp`), lancé dans le sandbox par le CLI. Le relais pose
@@ -77,7 +77,20 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
   `erreur`, pas un `needs_login`.
 - **Pour les consommateurs** : un sandbox à clé seule répond `loggedIn: false` — lire `apiKey`, pas
   seulement `loggedIn`, avant de conclure qu'il faut se reconnecter.
-- Un run à la fois par sandbox, clé comprise (même unité `sandbox-run-<slug>`).
+- **La clé remise avec le run** (`api_key`, et `workspace` pour une clé d'organisation
+  Anthropic, qui part en `ANTHROPIC_CUSTOM_HEADERS`) : c'est le chemin du worker, qui
+  reçoit la clé de l'org avec chaque travail. Elle est écrite dans `CLES/<slug>.run-<id>`
+  (root 0600), servie par `EnvironmentFile=`, **effacée à la fin du run** : aucune copie ne
+  reste sur la box, et la rotation dans le coffre vaut au run suivant. `PUT /key` reste
+  pour une connexion à la main.
+- **Un run de SESSION à la fois par sandbox** (le verrou protège le rafraîchissement du
+  jeton OAuth). **Les runs par clé n'ont pas ce verrou** : chacun a son unité
+  (`sandbox-run-<slug>-<id>`) et son `CLAUDE_CONFIG_DIR` (`~/.ferme-runs/<id>`, effacé à la
+  fin) — plusieurs tournent en parallèle dans le sandbox d'une org.
+- **Places de la box** : `FERME_RUNS_MAX` runs en vol (défaut 3), tous modes confondus ;
+  au-delà, 429. Un refus avant réservation ne garde rien (place, fichier, dossier).
+- `effort` → `--effort` du CLI (`none`, valeur du catalogue d'oto pour un modèle qui ne
+  raisonne pas, ne part pas).
 
 **Durée d'un run** : `max_seconds` (la durée déclarée sur l'agent, oto-backend) devient le
 `RuntimeMaxSec` de l'unité, borné à 60–3600 s ; sans lui, les 1800 s des brides. Le worker
