@@ -70,7 +70,7 @@ test (vous trois seulement). Julien et un collègue seront prévenus du **risque
 Claude (clients et eux-mêmes) une fois ces évolutions faites.
 
 1. ~~Secrets hors des scripts~~ : lus au démarrage dans le Secret Manager (`deploy/secrets.sh`).
-2. **Historique en direct** : chaque message du CLI apposé au fil du run (`run_messages`) pendant le run.
+2. ~~Historique en direct~~ : chaque message du CLI apposé au fil du run (`run_messages`) à son arrivée (oto-runner#26).
 3. **Plafond de consommation** : jamais au-delà de x % de l'usage **total** du compte (fenêtres 5 h et 7 j,
    usage perso compris). x réglé par l'org, chacun peut descendre plus bas pour son compte (le plus strict
    gagne). Au seuil, le run en cours **finit**, les suivants **attendent** la réinitialisation.
