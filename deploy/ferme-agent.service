@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# FERME_TOKEN (jeton partagé avec le backend) et FERME_HOST (IP privée de la box)
+# FERME_HOST, FERME_RELAIS_PYTHON ; FERME_TOKEN vient du Secret Manager (drop-in 20-secrets.conf)
 EnvironmentFile=/etc/ferme/agent.env
 ExecStart=/usr/bin/python3 /opt/ferme/agent.py
 Restart=on-failure

@@ -33,48 +33,67 @@ sur une box à soi. Quatre pièces : **une box**, **l'agent des sandboxes** (ce 
   l'agent toutes les 2 minutes. À ajouter selon votre socle : CrowdSec, agent de supervision machine,
   SSH par clé seule.
 
-## 2. oto-runner et l'agent
+## 2. Les secrets
+
+**Aucun secret sur disque.** Les services lisent les leurs au démarrage dans le Secret Manager Scaleway
+(`deploy/secrets/ferme-secrets`, lancé en `ExecStartPre` par les drop-ins `20-secrets.conf`), qui les
+écrit dans `/run/ferme-secrets/` (tmpfs, 600). Échec fermé : secret introuvable, le service ne démarre pas.
+
+1. Un **projet Scaleway dédié** à la box, et dedans deux secrets (chemin `/`) :
+   - `ferme-token` : le jeton de l'agent, que vous générez (`openssl rand -hex 24`) — le backend le
+     reçoit aussi (§4) ;
+   - `oto-worker-secret-abonnement` : le secret machine du worker (§5).
+2. Une **application IAM** en lecture seule sur ce seul projet (`SecretManagerReadOnly` +
+   `SecretAccess`), et sa clé sur la box dans `/etc/ferme-secrets/scw-key` (600) :
+   `SCW_ACCESS_KEY=…`, `SCW_SECRET_KEY=…`, `SCW_PROJECT_ID=…`, et `SCW_REGION=…` si ce n'est pas fr-par.
+3. `bash deploy/secrets.sh <hôte-ssh>` pose le chargeur et les drop-ins, puis tire les deux profils
+   pour vérifier.
+
+Tourner un secret = nouvelle version dans le Secret Manager, puis redémarrer le service. Copie de
+référence dans votre coffre (1Password…).
+
+## 3. oto-runner et l'agent
 
 ```
 bash deploy/oto-runner.sh <hôte-ssh> <checkout d'oto-runner>   # /srv/oto-runner : relais MCP + worker
 bash deploy/installer.sh  <hôte-ssh> <ip-privée-de-la-box>      # Node 22, Claude Code épinglé, agent
 ```
 
-`installer.sh` crée **une seule fois** `/etc/ferme/agent.env` (0600) : `FERME_TOKEN` (le jeton de
-l'agent, généré) et `FERME_HOST`. **Copiez `FERME_TOKEN` dans votre coffre de secrets** : le backend et
-le worker en ont besoin. Le changer = mettre à jour le coffre, le backend et le worker.
+`installer.sh` n'écrit que des valeurs non secrètes dans `/etc/ferme/agent.env` (`FERME_HOST`,
+`FERME_RELAIS_PYTHON`), et refuse de continuer s'il y trouve un `FERME_TOKEN`.
 
 Vérifier l'isolement **depuis un vrai run**, après toute modification des brides (`BRIDES` dans
 `agent.py`) : poser `tests/isolation.js` dans `/usr/local/share/ferme/`, créer un sandbox de test,
 `python3 /opt/ferme/isolation.py <id>`. Attendu : localhost, métadonnées du fournisseur
 (169.254.42.42) et réseau privé bloqués ; `/opt` et `/etc/ferme` invisibles ; Anthropic joignable.
 
-## 3. Le backend oto
+## 4. Le backend oto
 
 Dans l'environnement du backend (toutes ses instances) :
 
 ```
 OTO_FERME_URL=http://<ip-privée-de-la-box>:8190
-OTO_FERME_TOKEN=<FERME_TOKEN>
+OTO_FERME_TOKEN=<le secret ferme-token>
 ```
 
 Contrôle depuis la machine du backend : `curl -H "Authorization: Bearer $OTO_FERME_TOKEN"
 http://<ip>:8190/api/sandboxes/test` rend **404** (sandbox inconnu). 401 = mauvais jeton ; délai
 dépassé = pare-feu.
 
-## 4. Le worker
+## 5. Le worker
 
 Créer son secret machine (admin plateforme) : `oto_admin_runner_worker op=create label="…"` — montré
-**une fois**, à ranger aussitôt dans le coffre. Puis, le secret sur l'entrée standard :
+**une fois** : le poser aussitôt dans le Secret Manager (`oto-worker-secret-abonnement`) et dans le
+coffre. Puis :
 
 ```
-<commande qui lit le secret dans le coffre> | bash deploy/worker.sh <hôte-ssh> <url-du-backend> [<n°>]
+bash deploy/worker.sh <hôte-ssh> <url-du-backend> [<n°>]
 ```
 
 Le journal doit dire `worker armé — … provider abonnement · modèle sub:sonnet`. Un second worker
 (`<n°>` = 2) double les runs simultanés — dans la limite de la mémoire (§1).
 
-## 5. Ouvrir à des personnes
+## 6. Ouvrir à des personnes
 
 Le chemin est fermé par défaut. Un admin l'ouvre compte par compte :
 `oto_admin_set_option(entity_type=user, entity_id=<sub>, option="claude_subscription", on=true)`.
@@ -84,7 +103,7 @@ La personne se connecte sur le dashboard (`/account/claude`), en choisissant che
 compte (une organisation Team ou Enterprise paierait à sa place), puis pose un agent sur un modèle
 `sub:*`.
 
-## 6. Recette
+## 7. Recette
 
 Une procédure qui appelle `oto_whoami`, un agent programmé sur `sub:sonnet` toutes les 5 minutes, un
 run : le journal du worker dit `done … modèle servi claude-sonnet-…`, et
@@ -94,6 +113,4 @@ Supprimer l'agent de test ensuite.
 ## Ce qui n'est pas automatisé
 
 - Pas de CI : les scripts se lancent depuis un poste qui a la clé SSH de la box.
-- Les secrets restent dans des fichiers 0600 sur la box ; les lire depuis le gestionnaire de secrets du
-  fournisseur au démarrage est à faire avant une ouverture large.
 - La box n'est pas sauvegardée : la perdre = chaque personne se reconnecte.

@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
-# Pose et démarre le worker `claude-subscription` sur la box (après oto-runner.sh et installer.sh).
+# Pose et démarre le worker `claude-subscription` sur la box (après oto-runner.sh, secrets.sh, installer.sh).
 #   bash deploy/worker.sh <hôte-ssh> <url-du-backend> [<n° d'instance, défaut 1>]
-# Le secret machine du worker (`otow_…`, oto_admin_runner_worker op=create) se lit sur l'ENTRÉE
-# standard, pour ne jamais passer par la ligne de commande ni l'historique :
-#   op read "op://oto/<élément>/credential" | bash deploy/worker.sh box-agents https://mcp.example.com
-# Le jeton de l'agent est repris de /etc/ferme/agent.env : un seul jeton, deux consommateurs.
+# Aucun secret ici : OTO_WORKER_SECRET et OTO_FERME_TOKEN viennent du Secret Manager au démarrage
+# (deploy/secrets.sh, profil `worker`). /etc/oto-runner/abonnement.env ne porte que le reste.
 set -euo pipefail
 HOTE_SSH=$1 BACKEND=${2%/} N=${3:-1}
-SECRET=$(cat)
-case "$SECRET" in otow_*) ;; *) echo "secret de worker attendu sur l'entrée standard (otow_…)" >&2; exit 1 ;; esac
 cd "$(dirname "$0")"
 scp -q oto-runner-abonnement.service "$HOTE_SSH":/etc/systemd/system/oto-runner-abonnement@.service
-# Le secret passe en PREMIÈRE ligne de l'entrée standard, le script ensuite : rien sur la ligne de commande.
-{ printf '%s\n' "$SECRET"; cat <<'DISTANT'; } | ssh "$HOTE_SSH" "BACKEND='$BACKEND' N='$N' bash -c 'read -r SECRET; export SECRET; exec bash -s'"
+ssh "$HOTE_SSH" BACKEND="'$BACKEND'" N="'$N'" bash -s <<'DISTANT'
 set -euo pipefail
-: "${BACKEND:?}" "${N:?}" "${SECRET:?}"
+: "${BACKEND:?}" "${N:?}"
+[ -x /usr/local/sbin/ferme-secrets ] || { echo "chargeur de secrets absent : lance d'abord deploy/secrets.sh" >&2; exit 1; }
 . /etc/ferme/agent.env
 id oto-runner >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin oto-runner
 install -d -m 750 -o oto-runner -g oto-runner /etc/oto-runner
@@ -26,8 +22,6 @@ OTO_RUNNER_ARMED=1
 OTO_BASE=$BACKEND
 OTO_MCP_URL=$BACKEND/mcp
 OTO_FERME_URL=http://$FERME_HOST:8190
-OTO_FERME_TOKEN=$FERME_TOKEN
-OTO_WORKER_SECRET=$SECRET
 FIN
 chown oto-runner:oto-runner /etc/oto-runner/abonnement.env.neuf
 mv /etc/oto-runner/abonnement.env.neuf /etc/oto-runner/abonnement.env

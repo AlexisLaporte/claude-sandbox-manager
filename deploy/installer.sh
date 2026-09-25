@@ -16,15 +16,18 @@ if ! command -v node >/dev/null; then
 fi
 [ "$(claude --version 2>/dev/null | cut -d' ' -f1)" = "$VERSION" ] || \
   npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$VERSION" >/dev/null
-# Jamais régénéré : sa copie vit dans 1Password (coffre oto, « Ferme de Claude — jeton de l agent »),
-# c'est là que le backend le prend. Le changer = mettre à jour 1Password et prévenir l'infra.
-if [ ! -f /etc/ferme/agent.env ]; then
-  umask 077
-  printf 'FERME_TOKEN=%s\nFERME_HOST=%s\n' "$(openssl rand -hex 24)" "$IP" > /etc/ferme/agent.env
+# Seulement des valeurs NON secrètes. FERME_TOKEN vient du Secret Manager au démarrage
+# (deploy/secrets.sh) : un jeton trouvé sur disque est une fuite, on refuse de continuer.
+if [ -f /etc/ferme/agent.env ] && grep -q '^FERME_TOKEN=' /etc/ferme/agent.env; then
+  echo "FERME_TOKEN écrit dans /etc/ferme/agent.env : retire-le (il vit dans le Secret Manager)" >&2
+  exit 1
 fi
-# Le relais MCP des sandboxes vient d'oto-runner (deploy/oto-runner.sh) : ajouté sans toucher au jeton.
-grep -q '^FERME_RELAIS_PYTHON=' /etc/ferme/agent.env || \
-  echo 'FERME_RELAIS_PYTHON=/srv/oto-runner/.venv/bin/python' >> /etc/ferme/agent.env
+umask 077
+touch /etc/ferme/agent.env
+poser() { grep -q "^$1=" /etc/ferme/agent.env && sed -i "s|^$1=.*|$1=$2|" /etc/ferme/agent.env || echo "$1=$2" >> /etc/ferme/agent.env; }
+poser FERME_HOST "$IP"
+poser FERME_RELAIS_PYTHON /srv/oto-runner/.venv/bin/python
+[ -x /usr/local/sbin/ferme-secrets ] || { echo "chargeur de secrets absent : lance d'abord deploy/secrets.sh" >&2; exit 1; }
 systemctl daemon-reload
 systemctl enable --now ferme-agent
 systemctl restart ferme-agent
