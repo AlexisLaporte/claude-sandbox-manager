@@ -48,8 +48,10 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 | DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
 | POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine |
 
-`mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors AUCUN outil intégré, seulement
-ceux du relais MCP d'oto-runner (`oto_runner.relais_mcp`), lancé dans le sandbox par le CLI. Le relais pose
+`mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors qu'un outil intégré, la délégation à un
+**sous-agent** (`Task` : même processus, même unité, même clé, même relais), et les outils du relais MCP
+d'oto-runner (`oto_runner.relais_mcp`), lancé dans le sandbox par le CLI. Un run attend ses sous-agents
+(`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`) : la durée de l'unité est sa seule borne de temps. Le relais pose
 `_org`/`_project`/`_run_id` et refuse tout outil hors de `tools`. Le flux se termine par un
 `ferme_resume` qui dit, en cas d'échec, si le sandbox est encore connecté.
 

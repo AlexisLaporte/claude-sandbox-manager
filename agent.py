@@ -97,6 +97,15 @@ WORKSPACE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 # d'oto (un modèle qui ne raisonne pas) : elle ne part pas.
 EFFORT = re.compile(r"^[a-z]{2,12}$")
 
+#: Les seuls outils INTÉGRÉS d'un run à relais : la délégation à un sous-agent. Ni shell,
+#: ni fichiers, ni web. Un sous-agent tourne dans le MÊME processus CLI, donc la même unité
+#: bridée, la même clé et le même relais `mcp__oto` ; il hérite du mode `dontAsk` et de la
+#: liste d'autorisation du parent. ⚠️ Que ses outils servis restent bornés à ceux du parent
+#: (un agent intégré déclare Bash, WebFetch…) s'éprouve sur la box : un sous-agent qui les
+#: tente doit être refusé. Le CLI épinglé (2.1.281) sert cet outil sous le nom `Task` (il
+#: accepte aussi `Agent`, et le sert quand même en `Task`).
+OUTILS_INTEGRES = ("Task",)
+
 ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
 verrous = {}     # slug -> Lock : un run de SESSION à la fois par sandbox
@@ -167,6 +176,11 @@ def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None):
            *(["-p", f"EnvironmentFile={env}"] if env else []),
            *(["-E", f"CLAUDE_CONFIG_DIR={config}"] if config else []),
            "-E", f"HOME={home(slug)}", "-E", "DISABLE_AUTOUPDATER=1",
+           # Un sous-agent tourne en arrière-plan : sans ceci, `claude -p` l'abandonne
+           # après 600 s, le travail payé et inachevé (deux runs du 07/09/2026). `0` =
+           # aucun plafond (CLI 2.1.281) : la durée de l'unité (`RuntimeMaxSec`, ou
+           # `max_seconds`) reste la seule borne de temps.
+           "-E", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0",
            "-E", "PATH=/usr/bin:/bin"]
     for b in BRIDES:
         cmd += ["-p", b]
@@ -474,8 +488,8 @@ def ecrire_config_mcp(slug, mcp):
 def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, effort=None):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
-    Avec `mcp` : les seuls outils du run sont ceux du relais (aucun outil intégré,
-    aucune config utilisateur). `run` tient ce que le run a réservé (`Run`) ; tout est
+    Avec `mcp` : les seuls outils du run sont ceux du relais, plus la délégation à un
+    sous-agent (`OUTILS_INTEGRES`) ; aucune config utilisateur. `run` tient ce que le run a réservé (`Run`) ; tout est
     rendu quoi qu'il arrive."""
     auth, unite = run.auth, run.unite
     config, p = None, None
@@ -488,8 +502,12 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
             args += ["--effort", effort]
         if mcp is not None:
             config = ecrire_config_mcp(slug, mcp)
-            args += ["--mcp-config", str(config), "--strict-mcp-config", "--tools", "",
-                     "--allowedTools", "mcp__oto", "--permission-mode", "dontAsk"]
+            # ⚠️ `--tools` borne les outils intégrés SERVIS ; `--allowedTools` dit ce qui
+            # s'exécute sans demander. Les deux, pas l'un ou l'autre.
+            args += ["--mcp-config", str(config), "--strict-mcp-config",
+                     "--tools", ",".join(OUTILS_INTEGRES),
+                     "--allowedTools", "mcp__oto", *OUTILS_INTEGRES,
+                     "--permission-mode", "dontAsk"]
         p = dans_le_sandbox(slug, args, unite=unite, env=run.env, duree=duree,
                             config=run.config)
         resultat, brut = None, ""
