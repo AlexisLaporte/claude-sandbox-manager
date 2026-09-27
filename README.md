@@ -79,14 +79,19 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
   seulement `loggedIn`, avant de conclure qu'il faut se reconnecter.
 - **La clé remise avec le run** (`api_key`, et `workspace` pour une clé d'organisation
   Anthropic, qui part en `ANTHROPIC_CUSTOM_HEADERS`) : c'est le chemin du worker, qui
-  reçoit la clé de l'org avec chaque travail. Elle est écrite dans `CLES/<slug>.run-<id>`
-  (root 0600), servie par `EnvironmentFile=`, **effacée à la fin du run** : aucune copie ne
-  reste sur la box, et la rotation dans le coffre vaut au run suivant. `PUT /key` reste
+  reçoit la clé de l'org avec chaque travail. Elle est écrite dans `CLES_RUN/<slug>.run-<id>`
+  (`/run/ferme/cles-run`, **en mémoire** — tmpfs, jamais le disque persistant ; root 0700/0600,
+  invisible aux runs), servie par `EnvironmentFile=`, **effacée à la fin du run** et au
+  démarrage de l'agent : aucune copie ne reste sur la box, et la rotation dans le coffre vaut au run suivant. `PUT /key` reste
   pour une connexion à la main.
 - **Un run de SESSION à la fois par sandbox** (le verrou protège le rafraîchissement du
   jeton OAuth). **Les runs par clé n'ont pas ce verrou** : chacun a son unité
   (`sandbox-run-<slug>-<id>`) et son `CLAUDE_CONFIG_DIR` (`~/.ferme-runs/<id>`, effacé à la
-  fin) — plusieurs tournent en parallèle dans le sandbox d'une org.
+  fin) — plusieurs tournent en parallèle dans le sandbox d'une org. ⚠️ Ce HOME appartient à
+  la personne et l'agent tourne en root : `.ferme-runs` est ouvert SANS suivre de lien
+  (`O_NOFOLLOW`), et tout ce qui s'y crée, s'y `chown` ou s'y efface passe par ce
+  descripteur — un lien posé à la place n'est jamais suivi, ni à la création ni au ménage.
+- **Un corps de run incomplet** (sans `prompt`) est refusé en 400 **avant** toute réservation.
 - **Places de la box** : `FERME_RUNS_MAX` runs en vol (défaut 3), tous modes confondus ;
   au-delà, 429. Un refus avant réservation ne garde rien (place, fichier, dossier).
 - `effort` → `--effort` du CLI (`none`, valeur du catalogue d'oto pour un modèle qui ne
@@ -99,7 +104,9 @@ déjà l'unité (le `finally` du flux) : la durée de l'unité est le filet, pas
 
 Tests hors box : `python3 -m unittest discover -s tests -p 'test_*.py'`. **À vérifier sur la box** avant
 usage : `systemd-run -p EnvironmentFile=…` accepté pour une unité éphémère et lu malgré
-`InaccessiblePaths=/etc/ferme` ; aucun `sk-ant-api` dans `ps`/`/proc/*/cmdline` pendant un run ; sur un
+`InaccessiblePaths=/etc/ferme` et `/run/ferme` ; `ProtectProc=invisible` accepté par l'unité éphémère,
+et un run ne voit plus le `cmdline` des runs d'une autre org ; aucun `sk-ant-api` dans
+`ps`/`/proc/*/cmdline` pendant un run ; sur un
 sandbox qui a les deux, un run `key` annonce `ANTHROPIC_API_KEY` et un run `session` annonce `none`.
 
 `GET /` sert `index.html`, la page qui joue le futur écran du dashboard.

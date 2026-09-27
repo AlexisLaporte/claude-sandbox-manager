@@ -41,6 +41,10 @@ RACINE = Path(os.environ.get("FERME_RACINE", "/srv/sandboxes"))
 # liens — un fichier posé dans le HOME du sandbox pourrait y être remplacé par un lien
 # vers un secret de la box, versé ensuite dans l'environnement du run.
 CLES = Path(os.environ.get("FERME_CLES", "/etc/ferme/cles"))
+# La clé remise AVEC un run (celle de l'org, par le worker) ne vit que le temps du run :
+# en mémoire (`/run`, tmpfs), jamais sur le disque persistant. Même règle que `CLES` :
+# root 0700, rendu invisible aux runs par les brides.
+CLES_RUN = Path(os.environ.get("FERME_CLES_RUN", "/run/ferme/cles-run"))
 PAGE = Path(__file__).with_name("index.html")
 JETON = os.environ["FERME_TOKEN"]
 HOTE = os.environ["FERME_HOST"]
@@ -72,7 +76,10 @@ BRIDES = [
     "100.64.0.0/10 fc00::/7 fe80::/10",
     # Le résolveur est systemd-resolved sur localhost : sans lui, pas de DNS, pas d'Anthropic.
     "IPAddressAllow=127.0.0.53/32 127.0.0.54/32",
-    "InaccessiblePaths=-/opt -/etc/ferme -/etc/oto-runner -/var/lib/postgresql",
+    f"InaccessiblePaths=-/opt -/etc/ferme -{CLES_RUN.parent} -/etc/oto-runner -/var/lib/postgresql",
+    # Le prompt et le `--system-prompt` passent en argv : sans ceci, tout processus de la
+    # box les lirait dans /proc/*/cmdline — ceux des AUTRES orgs compris.
+    "ProtectProc=invisible", "ProcSubset=pid",
     "RuntimeMaxSec=1800",   # un run qui ne rend jamais la main ne tient pas le sandbox indéfiniment
 ]
 # La durée qu'un run peut DEMANDER (`max_seconds`, déclarée sur l'agent) : de 60 s à une
@@ -208,7 +215,7 @@ def ecrire_env(chemin, cle, workspace=None):
         raise Erreur(422, "clé d'API invalide : une clé de la Console Anthropic (sk-ant-api…) est attendue")
     if workspace is not None and not WORKSPACE.fullmatch(workspace):
         raise Erreur(422, "workspace invalide")
-    CLES.mkdir(mode=0o700, parents=True, exist_ok=True)
+    chemin.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     provisoire = chemin.with_name(f".{chemin.name}.{uuid.uuid4().hex}")
     fd = os.open(provisoire, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -316,6 +323,69 @@ def transmettre_code(slug, code):
     return etat(slug)
 
 
+def _ouvrir_runs(slug, creer=False):
+    """Le dossier `<HOME>/.ferme-runs`, ouvert SANS suivre de lien — ou None s'il manque.
+
+    L'agent tourne en root dans un HOME qui appartient à la personne : un lien posé à la
+    place de `.ferme-runs` ferait créer, `chown` ou effacer ailleurs sur la box. Tout ce
+    qui suit passe par ce descripteur (`dir_fd`), jamais par le chemin : un lien posé
+    APRÈS la vérification n'est pas suivi non plus."""
+    runs = home(slug) / ".ferme-runs"
+    if creer:
+        try:
+            os.mkdir(runs, 0o700)
+        except FileExistsError:
+            pass
+    try:
+        fd = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # ELOOP (un lien) ou ENOTDIR (un fichier) : jamais suivi.
+        raise Erreur(500, f"{runs} n'est pas un dossier : refusé (lien symbolique ?)")
+    if creer:
+        compte = pwd.getpwnam(utilisateur(slug))
+        os.fchown(fd, compte.pw_uid, compte.pw_gid)
+    return fd
+
+
+def creer_config_du_run(slug, ident):
+    """Le `CLAUDE_CONFIG_DIR` d'un run par clé : `<HOME>/.ferme-runs/<ident>`, 0700, à la
+    personne — créé à travers le descripteur de `.ferme-runs`, jamais par le chemin."""
+    fd = _ouvrir_runs(slug, creer=True)
+    try:
+        os.mkdir(ident, 0o700, dir_fd=fd)
+        compte = pwd.getpwnam(utilisateur(slug))
+        os.chown(ident, compte.pw_uid, compte.pw_gid, dir_fd=fd, follow_symlinks=False)
+    finally:
+        os.close(fd)
+    return home(slug) / ".ferme-runs" / ident
+
+
+def _effacer_sous(fd, nom):
+    """Efface `nom` dans le dossier ouvert `fd`, sans suivre de lien : `/proc/self/fd/<fd>`
+    désigne le VRAI dossier ouvert, quoi qu'on ait posé depuis à son chemin, et
+    `shutil.rmtree` refuse une racine qui est un lien."""
+    chemin = f"/proc/self/fd/{fd}/{nom}"
+    if os.path.islink(chemin):
+        os.unlink(chemin)       # le lien lui-même, jamais sa cible
+    else:
+        shutil.rmtree(chemin, ignore_errors=True)
+
+
+def effacer_config_du_run(slug, ident):
+    try:
+        fd = _ouvrir_runs(slug)
+    except Erreur:
+        return                  # `.ferme-runs` remplacé par un lien : on ne suit pas
+    if fd is None:
+        return
+    try:
+        _effacer_sous(fd, ident)
+    finally:
+        os.close(fd)
+
+
 class Run:
     """Ce qu'UN run tient, et ce qu'il rend à sa fin — quoi qu'il arrive.
 
@@ -342,18 +412,14 @@ class Run:
                 return
             self.unite = f"sandbox-run-{slug}-{self.ident}.service"
             if cle_du_run:
-                self.env_du_run = CLES / f"{slug}.run-{self.ident}"
+                self.env_du_run = CLES_RUN / f"{slug}.run-{self.ident}"
                 ecrire_env(self.env_du_run, cle_du_run, workspace)
                 self.env = self.env_du_run
             else:
                 if workspace:
                     raise Erreur(400, "`workspace` accompagne une clé remise avec le run")
                 self.env = fichier_cle(slug)
-            self.config = home(slug) / ".ferme-runs" / self.ident
-            compte = pwd.getpwnam(utilisateur(slug))
-            for d in (self.config.parent, self.config):
-                d.mkdir(mode=0o700, exist_ok=True)
-                os.chown(d, compte.pw_uid, compte.pw_gid)
+            self.config = creer_config_du_run(slug, self.ident)
         except BaseException:
             self.liberer()
             raise
@@ -366,7 +432,7 @@ class Run:
         if self.env_du_run is not None:
             self.env_du_run.unlink(missing_ok=True)
         if self.config is not None:
-            shutil.rmtree(self.config, ignore_errors=True)
+            effacer_config_du_run(self.slug, self.ident)
         if self.verrou is not None:
             self.verrou.release()
             self.verrou = None
@@ -396,10 +462,12 @@ def ecrire_config_mcp(slug, mcp):
                 "OTO_RUN_ID": mcp.get("run_id") or "", "OTO_TOOLS": ",".join(mcp.get("tools") or ())}}}}
     chemin = home(slug) / f".ferme-mcp-{uuid.uuid4().hex}.json"
     compte = pwd.getpwnam(utilisateur(slug))
-    fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # O_EXCL refuse un lien déjà posé à ce nom ; `fchown` agit sur CE fichier, jamais sur
+    # ce qu'un lien posé ensuite au même chemin désignerait.
+    fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as f:
+        os.fchown(f.fileno(), compte.pw_uid, compte.pw_gid)
         json.dump(config, f)
-    os.chown(chemin, compte.pw_uid, compte.pw_gid)
     return chemin
 
 
@@ -534,13 +602,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run(self, slug, c):
         # Tout ce qui se refuse se refuse AVANT de réserver : un refus ne réserve rien.
+        # Le prompt compris : lu après `Run(...)`, son absence gardait une place et
+        # laissait la clé du run sur le disque (trois requêtes bloquaient la box).
+        prompt = c.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise Erreur(400, "prompt manquant ou vide (un texte)")
         auth = mode_auth(slug, c.get("auth"), c.get("api_key"))
         duree = duree_du_run(c.get("max_seconds"))
         effort = c.get("effort")
         if effort is not None and not EFFORT.fullmatch(str(effort)):
             raise Erreur(400, f"effort invalide : {effort!r}")
         run = Run(slug, auth, cle_du_run=c.get("api_key"), workspace=c.get("workspace"))
-        flux = flux_du_run(slug, run, c["prompt"], c.get("model", "sonnet"),
+        flux = flux_du_run(slug, run, prompt, c.get("model", "sonnet"),
                            system=c.get("system"), mcp=c.get("mcp"), duree=duree,
                            effort=effort)
         try:
@@ -581,14 +654,27 @@ def nettoyer_restes():
     (`CLES/*.run-*`) et les configs de run (`<sandbox>/.ferme-runs/*`). Un redémarrage
     saute les `finally` des fils du serveur : sans ce ménage, chaque déploiement en pleine
     charge laisserait une copie de clé d'org sur la box."""
-    if CLES.is_dir():
-        for f in CLES.iterdir():
-            if ".run-" in f.name:
-                f.unlink(missing_ok=True)
+    for d in (CLES, CLES_RUN):      # `CLES` : les restes d'avant le passage en mémoire
+        if d.is_dir():
+            for f in d.iterdir():
+                if ".run-" in f.name:
+                    f.unlink(missing_ok=True)
     if RACINE.is_dir():
-        for runs in RACINE.glob("*/.ferme-runs"):
-            for d in runs.iterdir():
-                shutil.rmtree(d, ignore_errors=True)
+        for sandbox in RACINE.iterdir():
+            slug = sandbox.name
+            if sandbox.is_symlink() or not sandbox.is_dir():
+                continue
+            try:
+                fd = _ouvrir_runs(slug)
+            except Erreur:
+                continue        # `.ferme-runs` remplacé par un lien : jamais suivi
+            if fd is None:
+                continue
+            try:
+                for nom in os.listdir(fd):
+                    _effacer_sous(fd, nom)
+            finally:
+                os.close(fd)
 
 
 if __name__ == "__main__":

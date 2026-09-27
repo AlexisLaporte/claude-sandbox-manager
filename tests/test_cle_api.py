@@ -18,7 +18,8 @@ from unittest import mock
 
 TMP = tempfile.mkdtemp(prefix="ferme-test-")
 os.environ.update(FERME_TOKEN="x", FERME_HOST="127.0.0.1", FERME_RELAIS_PYTHON="/usr/bin/python3",
-                  FERME_RACINE=f"{TMP}/sandboxes", FERME_CLES=f"{TMP}/cles")
+                  FERME_RACINE=f"{TMP}/sandboxes", FERME_CLES=f"{TMP}/cles",
+                  FERME_CLES_RUN=f"{TMP}/run-ferme/cles-run")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent  # noqa: E402
 
@@ -327,8 +328,9 @@ class RienNeFuit(Base):
                 mock.patch.object(agent.subprocess, "run"), self.assertRaises(BrokenPipeError):
             self._handler(casse)._run("bac", corps)
         self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
-        self.assertEqual([f for f in agent.CLES.iterdir() if ".run-" in f.name], [],
-                         "la clé du run est restée sur le disque")
+        for d in (agent.CLES, agent.CLES_RUN):
+            restes = [f for f in d.iterdir() if ".run-" in f.name] if d.is_dir() else []
+            self.assertEqual(restes, [], f"la clé du run est restée sur le disque ({d})")
 
     def test_client_parti_avant_le_premier_octet(self):
         self._essai("entetes")
@@ -347,6 +349,107 @@ class RienNeFuit(Base):
         self.assertFalse(reste_cle.exists())
         self.assertFalse(reste_config.exists())
         self.assertTrue(agent.cle_presente("bac"))
+
+
+class CorpsIncomplet(Base):
+    """Un corps de run incomplet se refuse AVANT de réserver quoi que ce soit."""
+
+    def _handler(self):
+        h = agent.Handler.__new__(agent.Handler)
+        h.headers = {"Accept": "application/x-ndjson"}
+        return h
+
+    def _refuse(self, corps):
+        with mock.patch.object(agent, "dans_le_sandbox") as sandbox:
+            with self.assertRaises(agent.Erreur) as e:
+                self._handler()._run("bac", corps)
+        self.assertEqual(e.exception.statut, 400)
+        sandbox.assert_not_called()
+        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        for d in (agent.CLES, agent.CLES_RUN):
+            restes = [f for f in d.iterdir() if ".run-" in f.name] if d.is_dir() else []
+            self.assertEqual(restes, [], f"une clé de run est restée ({d})")
+
+    def test_sans_prompt(self):
+        self._refuse({"auth": "key", "api_key": CLE})
+
+    def test_prompt_qui_n_est_pas_un_texte(self):
+        self._refuse({"auth": "key", "api_key": CLE, "prompt": ["x"]})
+
+    def test_prompt_vide(self):
+        self._refuse({"auth": "key", "api_key": CLE, "prompt": "  "})
+
+
+class LiensDuSandbox(Base):
+    """Le HOME est au sandbox : un lien qu'il y pose ne doit jamais être suivi par root."""
+
+    def setUp(self):
+        super().setUp()
+        self.menage()
+        self.addCleanup(self.menage)
+        self.victime = Path(tempfile.mkdtemp(prefix="victime-", dir=TMP))
+        (self.victime / "garde").mkdir()
+        (self.victime / "garde" / "fichier").write_text("précieux")
+
+    @staticmethod
+    def menage():
+        import shutil
+        for nom in (".ferme-runs", ".ferme-runs-deplace"):
+            d = agent.home("bac") / nom
+            if d.is_symlink() or d.is_file():
+                d.unlink()
+            elif d.is_dir():
+                shutil.rmtree(d)
+
+    def contenu_victime(self):
+        return sorted(str(p.relative_to(self.victime)) for p in self.victime.rglob("*"))
+
+    def test_un_lien_ferme_runs_refuse_le_run_sans_toucher_la_cible(self):
+        avant = self.contenu_victime()
+        (agent.home("bac") / ".ferme-runs").symlink_to(self.victime)
+        with self.assertRaises(agent.Erreur):
+            agent.Run("bac", "key", cle_du_run=CLE)
+        self.assertEqual(self.contenu_victime(), avant, "root a écrit à travers le lien")
+        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+
+    def test_la_liberation_ne_suit_pas_un_lien_pose_pendant_le_run(self):
+        r = agent.Run("bac", "key", cle_du_run=CLE)
+        (self.victime / r.ident).mkdir()
+        (self.victime / r.ident / "fichier").write_text("précieux")
+        avant = self.contenu_victime()
+        runs = agent.home("bac") / ".ferme-runs"
+        runs.rename(agent.home("bac") / ".ferme-runs-deplace")
+        runs.symlink_to(self.victime)
+        r.liberer()
+        self.assertEqual(self.contenu_victime(), avant, "root a effacé à travers le lien")
+
+    def test_le_demarrage_ne_suit_pas_un_lien(self):
+        avant = self.contenu_victime()
+        (agent.home("bac") / ".ferme-runs").symlink_to(self.victime)
+        agent.nettoyer_restes()
+        self.assertEqual(self.contenu_victime(), avant, "root a vidé la cible du lien")
+
+    def test_la_config_mcp_ne_suit_pas_de_lien(self):
+        with mock.patch.object(agent.os, "chown", side_effect=AssertionError(
+                "chown par chemin : suivrait un lien posé après la création")):
+            chemin = agent.ecrire_config_mcp("bac", {"url": "u", "token": "t"})
+        self.assertFalse(chemin.is_symlink())
+        chemin.unlink()
+
+
+class DurcissementsDeLaBox(Base):
+    def test_la_cle_d_un_run_vit_en_memoire_hors_de_etc(self):
+        r = agent.Run("bac", "key", cle_du_run=CLE)
+        try:
+            self.assertEqual(r.env_du_run.parent, agent.CLES_RUN)
+            self.assertNotEqual(agent.CLES_RUN, agent.CLES)
+        finally:
+            r.liberer()
+
+    def test_les_brides_cachent_les_cles_de_run_et_les_processus_des_autres(self):
+        brides = " ".join(agent.BRIDES)
+        self.assertIn(f"-{agent.CLES_RUN.parent}", brides)
+        self.assertIn("ProtectProc=invisible", agent.BRIDES)
 
 
 if __name__ == "__main__":
