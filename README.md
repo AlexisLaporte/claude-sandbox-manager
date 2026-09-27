@@ -48,12 +48,30 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 | DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
 | POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine |
 
-`mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors qu'un outil intégré, la délégation à un
-**sous-agent** (`Task` : même processus, même unité, même clé, même relais), et les outils du relais MCP
+`mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors que deux outils intégrés, la délégation à un
+**sous-agent** (`Task` : même processus, même unité, même clé, même relais) et `Read` borné (ci-dessous), et les outils du relais MCP
 d'oto-runner (`oto_runner.relais_mcp`), lancé dans le sandbox par le CLI. Un run attend ses sous-agents
 (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`) : la durée de l'unité est sa seule borne de temps. Le relais pose
 `_org`/`_project`/`_run_id` et refuse tout outil hors de `tools`. Le flux se termine par un
 `ferme_resume` qui dit, en cas d'échec, si le sandbox est encore connecté.
+
+**`Read` borné** (runs à relais) : il ne sert qu'à relire un gros résultat d'outil que le CLI
+a rangé dans un fichier (au-delà de `MAX_MCP_OUTPUT_TOKENS=10000`, un enregistrement par
+ligne, lu par `offset`/`limit`). Trois gestes vont ensemble, et aucun ne suffit seul :
+- le run tourne dans un **répertoire vide qui lui est propre** (`~/.ferme-travail/<session>`),
+  jamais dans le HOME : le CLI lit son répertoire de travail SANS règle, et le HOME porte la
+  session claude.ai et la config MCP (le jeton du travail) ;
+- `Read` n'est permis que sur `<config>/projects/<projet du répertoire>/<session>/tool-results/**`
+  (`--session-id` fixe la session ; `<config>` = `~/.claude`, ou le `CLAUDE_CONFIG_DIR` du run
+  par clé) — ni les autres runs, ni les transcripts ;
+- refus explicites en seconde ceinture : `.credentials.json`, `~/.claude.json`,
+  `.ferme-mcp-*.json`, `/proc/**`.
+Le répertoire et le dossier que le CLI y associe (transcript, résultats : des données du
+client) sont effacés à la fin du run — avant la config du run par clé qui les porte — et au
+démarrage de l'agent. Comme `.ferme-runs`, `.ferme-travail` et `.claude/projects` sont
+ouverts sans suivre de lien : création, `chown` et effacement passent par descripteur.
+⚠️ Un résultat de 10 000 à 25 000 jetons, qui restait jusqu'ici dans le contexte, part
+désormais dans un fichier : un tour de `Read` de plus pour le relire.
 
 ### Deux connexions : session et clé d'API
 
@@ -110,6 +128,10 @@ usage : `systemd-run -p EnvironmentFile=…` accepté pour une unité éphémèr
 et un run ne voit plus le `cmdline` des runs d'une autre org ; aucun `sk-ant-api` dans
 `ps`/`/proc/*/cmdline` pendant un run ; sur un
 sandbox qui a les deux, un run `key` annonce `ANTHROPIC_API_KEY` et un run `session` annonce `none`.
+**Avant de servir `Read`** : `python3 tests/banc_read.py /usr/bin/claude` sur la box, en root puis
+en `sandbox-*` (sortie 0 = conforme ; passé sur macOS / CLI 2.1.281 — `/proc/self/environ`, qui
+porte la clé d'un run par clé, n'est pas encore prouvé refusé sous Linux). Et un sous-agent
+(`claude-code-guide`, `general-purpose`) à qui l'on fait tenter Bash puis WebFetch est refusé.
 
 `GET /` sert `index.html`, la page qui joue le futur écran du dashboard.
 

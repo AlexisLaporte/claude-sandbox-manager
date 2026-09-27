@@ -104,7 +104,30 @@ EFFORT = re.compile(r"^[a-z]{2,12}$")
 #: (un agent intégré déclare Bash, WebFetch…) s'éprouve sur la box : un sous-agent qui les
 #: tente doit être refusé. Le CLI épinglé (2.1.281) sert cet outil sous le nom `Task` (il
 #: accepte aussi `Agent`, et le sert quand même en `Task`).
-OUTILS_INTEGRES = ("Task",)
+OUTILS_INTEGRES = ("Task", "Read")
+
+#: Au-delà de ce nombre de jetons, le CLI range un résultat d'outil dans un FICHIER
+#: texte, une ligne du résultat par ligne du fichier, et `Read` le lit par morceaux
+#: (`offset`/`limit`). Sans ce réglage (25 000 par défaut), un résultat entre ~50 Ko et
+#: 25 000 jetons part dans un autre format : les blocs MCP en JSON, tout le texte sur
+#: UNE ligne échappée, que `Read` refuse en entier (mesuré sur le CLI 2.1.281 : une
+#: ligne de 38 851 jetons, refusée même avec `offset`/`limit`). Mesuré sur des profils
+#: réels accentués (FR/ES/IT) : à 12 000, 47 k caractères restent en ligne et le fichier
+#: texte prend le relais à 49 k — marge trop mince pour un contenu compressible (URL,
+#: identifiants). 10 000 range en fichier texte dès ~44 k caractères. Reste illisible :
+#: un contenu de plus de ~50 Ko sous 10 000 jetons (> 5 caractères par jeton).
+MCP_JETONS_MAX = 10000
+
+#: Ajouté au prompt système d'un run à relais : le message du CLI propose `jq`, que ce
+#: run n'a pas — un tour perdu à chaque gros résultat sans cette phrase.
+CONSIGNE_LECTURE = (
+    "Un résultat d'outil trop gros est rangé dans un fichier dont le message donne le "
+    "chemin : lis-le par morceaux avec Read (offset/limit). Il n'y a ni shell, ni jq, "
+    "ni Python dans ce run.")
+
+# Les dossiers que l'agent crée, en root, dans le HOME du sandbox : les configs des runs
+# par clé, et les répertoires de travail des runs à relais.
+RUNS, TRAVAIL = ".ferme-runs", ".ferme-travail"
 
 ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
@@ -161,17 +184,20 @@ def duree_du_run(demande):
     return max(DUREE_RUN_MIN_S, min(demande, DUREE_RUN_MAX_S))
 
 
-def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None):
+def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None,
+                    repertoire=None, variables=()):
     """Commande exécutée comme la personne, dans une unité éphémère bridée.
 
     `env` : un fichier de `CLES` (la clé d'API, le workspace) qui entre dans
     l'environnement de l'unité par `EnvironmentFile=` — lu par systemd, jamais dans
     l'argv de `systemd-run`, que tout utilisateur de la box peut lire dans /proc.
-    `config` : un `CLAUDE_CONFIG_DIR` propre au run (runs par clé, cf. `Run`)."""
+    `config` : un `CLAUDE_CONFIG_DIR` propre au run (runs par clé, cf. `Run`).
+    `repertoire` : le répertoire de travail (le HOME par défaut). `variables` : des
+    `NOM=valeur` de plus, en argv — donc jamais un secret."""
     cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect",
            *([f"--unit={unite}"] if unite else []),
            f"--uid={utilisateur(slug)}", f"--gid={utilisateur(slug)}",
-           f"--working-directory={home(slug)}",
+           f"--working-directory={repertoire or home(slug)}",
            f"-p", f"ReadWritePaths={home(slug)}",
            *(["-p", f"EnvironmentFile={env}"] if env else []),
            *(["-E", f"CLAUDE_CONFIG_DIR={config}"] if config else []),
@@ -182,6 +208,8 @@ def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None):
            # `max_seconds`) reste la seule borne de temps.
            "-E", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0",
            "-E", "PATH=/usr/bin:/bin"]
+    for v in variables:
+        cmd += ["-E", v]
     for b in BRIDES:
         cmd += ["-p", b]
     if duree is not None:
@@ -337,43 +365,67 @@ def transmettre_code(slug, code):
     return etat(slug)
 
 
-def _ouvrir_runs(slug, creer=False):
-    """Le dossier `<HOME>/.ferme-runs`, ouvert SANS suivre de lien — ou None s'il manque.
+def _ouvrir_dossier(slug, *noms, creer=False):
+    """Le dossier `<HOME>/<noms…>`, ouvert composant par composant SANS suivre de lien — ou
+    None s'il manque.
 
     L'agent tourne en root dans un HOME qui appartient à la personne : un lien posé à la
-    place de `.ferme-runs` ferait créer, `chown` ou effacer ailleurs sur la box. Tout ce
-    qui suit passe par ce descripteur (`dir_fd`), jamais par le chemin : un lien posé
-    APRÈS la vérification n'est pas suivi non plus."""
-    runs = home(slug) / ".ferme-runs"
-    if creer:
-        try:
-            os.mkdir(runs, 0o700)
-        except FileExistsError:
-            pass
+    place de `.ferme-runs`, `.ferme-travail`, `.claude`… ferait créer, `chown` ou effacer
+    ailleurs sur la box. Tout ce qui suit passe par le descripteur rendu (`dir_fd`),
+    jamais par le chemin : un lien posé APRÈS la vérification n'est pas suivi non plus.
+    `creer` : les composants manquants sont créés (0700) et rendus à la personne."""
+    chemin = home(slug)
     try:
-        fd = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(chemin, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:
+        if creer:
+            raise
         return None
-    except OSError:
-        # ELOOP (un lien) ou ENOTDIR (un fichier) : jamais suivi.
-        raise Erreur(500, f"{runs} n'est pas un dossier : refusé (lien symbolique ?)")
-    if creer:
-        compte = pwd.getpwnam(utilisateur(slug))
-        os.fchown(fd, compte.pw_uid, compte.pw_gid)
+    compte = pwd.getpwnam(utilisateur(slug)) if creer else None
+    for nom in noms:
+        chemin = chemin / nom
+        try:
+            if creer:
+                try:
+                    os.mkdir(nom, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            try:
+                suivant = os.open(nom, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return None
+            except OSError:
+                # ELOOP (un lien) ou ENOTDIR (un fichier) : jamais suivi.
+                raise Erreur(500, f"{chemin} n'est pas un dossier : refusé (lien symbolique ?)")
+        finally:
+            os.close(fd)
+        if creer:
+            try:
+                os.fchown(suivant, compte.pw_uid, compte.pw_gid)
+            except BaseException:
+                os.close(suivant)
+                raise
+        fd = suivant
     return fd
 
 
-def creer_config_du_run(slug, ident):
-    """Le `CLAUDE_CONFIG_DIR` d'un run par clé : `<HOME>/.ferme-runs/<ident>`, 0700, à la
-    personne — créé à travers le descripteur de `.ferme-runs`, jamais par le chemin."""
-    fd = _ouvrir_runs(slug, creer=True)
+def creer_dossier_du_run(slug, parent, ident):
+    """`<HOME>/<parent>/<ident>`, NEUF, 0700, à la personne — créé à travers le
+    descripteur de `parent`, jamais par le chemin. Sert la config d'un run par clé
+    (`RUNS`) et le répertoire de travail d'un run à relais (`TRAVAIL`)."""
+    fd = _ouvrir_dossier(slug, parent, creer=True)
     try:
         os.mkdir(ident, 0o700, dir_fd=fd)
         compte = pwd.getpwnam(utilisateur(slug))
         os.chown(ident, compte.pw_uid, compte.pw_gid, dir_fd=fd, follow_symlinks=False)
     finally:
         os.close(fd)
-    return home(slug) / ".ferme-runs" / ident
+    return home(slug) / parent / ident
+
+
+def creer_config_du_run(slug, ident):
+    """Le `CLAUDE_CONFIG_DIR` d'un run par clé : `<HOME>/.ferme-runs/<ident>`."""
+    return creer_dossier_du_run(slug, RUNS, ident)
 
 
 def _effacer_sous(fd, nom):
@@ -387,17 +439,41 @@ def _effacer_sous(fd, nom):
         shutil.rmtree(chemin, ignore_errors=True)
 
 
-def effacer_config_du_run(slug, ident):
+def effacer_dans(slug, noms, garder=lambda nom: True):
+    """Efface, dans `<HOME>/<noms…>` ouvert sans suivre de lien, chaque entrée que `garder`
+    retient. Un dossier manquant ou remplacé par un lien : rien, jamais suivi."""
     try:
-        fd = _ouvrir_runs(slug)
+        fd = _ouvrir_dossier(slug, *noms)
     except Erreur:
-        return                  # `.ferme-runs` remplacé par un lien : on ne suit pas
+        return
     if fd is None:
         return
     try:
-        _effacer_sous(fd, ident)
+        for nom in os.listdir(fd):
+            if garder(nom):
+                _effacer_sous(fd, nom)
     finally:
         os.close(fd)
+
+
+def effacer_config_du_run(slug, ident):
+    effacer_dans(slug, (RUNS,), lambda nom: nom == ident)
+
+
+def projet_du_cli(repertoire):
+    """Le nom du dossier où le CLI range la session d'un répertoire de travail :
+    `<config>/projects/<nom>/`. Chaque caractère hors [A-Za-z0-9] devient `-` (relevé
+    sur le CLI 2.1.281 : `/a/.b-c` → `-a--b-c`)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(repertoire))
+
+
+def effacer_le_travail(slug, travail, config=None):
+    """Le répertoire du run et ce que le CLI a rangé pour lui (transcript, résultats
+    d'outils : des données du client) — jamais rien hors de ces deux dossiers, et par
+    descripteur. `config` : le `CLAUDE_CONFIG_DIR` du run, sous le HOME (`.claude` sans)."""
+    effacer_dans(slug, (TRAVAIL,), lambda nom: nom == travail.name)
+    base = Path(config).relative_to(home(slug)).parts if config else (".claude",)
+    effacer_dans(slug, (*base, "projects"), lambda nom: nom == projet_du_cli(travail))
 
 
 class Run:
@@ -485,6 +561,42 @@ def ecrire_config_mcp(slug, mcp):
     return chemin
 
 
+def outils_du_run(maison, repertoire, session, config=None):
+    """Les options d'outils d'un run à relais, et rien d'autre (testées à part).
+
+    `Read` ne sert qu'à relire un gros résultat d'outil que le CLI a rangé dans un
+    fichier. Il est donc borné au dossier des résultats de CETTE session :
+    `<config>/projects/<projet du répertoire>/<session>/tool-results/`, où `config` est
+    le dossier de config du CLI : `<maison>/.claude` par défaut (session claude.ai), ou
+    le `CLAUDE_CONFIG_DIR` propre au run quand il y en a un (runs par clé). Les refus,
+    eux, visent toujours la session claude.ai et les fichiers du HOME.
+
+    ⚠️ Le répertoire de travail est lisible SANS règle : c'est pourquoi un run à relais
+    tourne dans un répertoire vide qui lui est propre, jamais dans le HOME — où sont la
+    session claude.ai de la personne et la config MCP qui porte le jeton du travail.
+    Hors de ce répertoire et de la règle ci-dessous, `dontAsk` refuse. Les refus
+    explicites sont une seconde ceinture : un refus l'emporte sur une permission."""
+    config = Path(config) if config else Path(maison) / ".claude"
+    resultats = config / "projects" / projet_du_cli(repertoire) / session / "tool-results"
+    return ["--tools", ",".join(OUTILS_INTEGRES),
+            "--allowedTools", "mcp__oto", "Task", f"Read(/{resultats}/**)",
+            "--disallowedTools",
+            f"Read(/{Path(maison) / '.claude' / '.credentials.json'})",
+            f"Read(/{Path(maison) / '.claude.json'})",
+            f"Read(/{Path(maison)}/.ferme-mcp-*.json)",
+            "Read(//proc/**)",
+            "--permission-mode", "dontAsk"]
+
+
+def options_du_relais(maison, repertoire, session, config_mcp, config=None):
+    """Tout ce qu'un run à relais ajoute à `claude -p` — la MÊME fonction sert le run et
+    le banc (`tests/banc_read.py`), pour que le banc éprouve les options réelles."""
+    return ["--mcp-config", str(config_mcp), "--strict-mcp-config",
+            "--session-id", session,
+            "--append-system-prompt", CONSIGNE_LECTURE,
+            *outils_du_run(maison, repertoire, session, config)]
+
+
 def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, effort=None):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
@@ -492,7 +604,7 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
     sous-agent (`OUTILS_INTEGRES`) ; aucune config utilisateur. `run` tient ce que le run a réservé (`Run`) ; tout est
     rendu quoi qu'il arrive."""
     auth, unite = run.auth, run.unite
-    config, p = None, None
+    config_mcp, travail, p = None, None, None
     try:
         debut = time.time()
         args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--model", modele]
@@ -500,16 +612,18 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
             args += ["--system-prompt", system]
         if effort and effort != "none":
             args += ["--effort", effort]
+        variables = ()
         if mcp is not None:
-            config = ecrire_config_mcp(slug, mcp)
+            config_mcp = ecrire_config_mcp(slug, mcp)
+            session = str(uuid.uuid4())
+            travail = creer_dossier_du_run(slug, TRAVAIL, session)
             # ⚠️ `--tools` borne les outils intégrés SERVIS ; `--allowedTools` dit ce qui
-            # s'exécute sans demander. Les deux, pas l'un ou l'autre.
-            args += ["--mcp-config", str(config), "--strict-mcp-config",
-                     "--tools", ",".join(OUTILS_INTEGRES),
-                     "--allowedTools", "mcp__oto", *OUTILS_INTEGRES,
-                     "--permission-mode", "dontAsk"]
+            # s'exécute sans demander. Les deux, pas l'un ou l'autre. `run.config` : la
+            # règle de `Read` suit le dossier où CE CLI range ses résultats.
+            args += options_du_relais(home(slug), travail, session, config_mcp, run.config)
+            variables = (f"MAX_MCP_OUTPUT_TOKENS={MCP_JETONS_MAX}",)
         p = dans_le_sandbox(slug, args, unite=unite, env=run.env, duree=duree,
-                            config=run.config)
+                            config=run.config, repertoire=travail, variables=variables)
         resultat, brut = None, ""
         for ligne in p.stdout:
             try:
@@ -549,8 +663,12 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
         if p is not None and p.poll() is None:
             subprocess.run(["systemctl", "stop", unite])
             p.wait(timeout=30)
-        if config is not None:
-            config.unlink(missing_ok=True)
+        if config_mcp is not None:
+            config_mcp.unlink(missing_ok=True)
+        if travail is not None:
+            # AVANT `liberer` : le transcript d'un run par clé vit dans sa config, que
+            # `liberer` efface — l'ordre inverse chercherait un dossier déjà parti.
+            effacer_le_travail(slug, travail, run.config)
         run.liberer()
 
 
@@ -669,9 +787,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def nettoyer_restes():
     """Au démarrage : ce qu'un arrêt en plein run a laissé — les clés remises avec un run
-    (`CLES/*.run-*`) et les configs de run (`<sandbox>/.ferme-runs/*`). Un redémarrage
-    saute les `finally` des fils du serveur : sans ce ménage, chaque déploiement en pleine
-    charge laisserait une copie de clé d'org sur la box."""
+    (`CLES/*.run-*`), les configs de run (`<sandbox>/.ferme-runs/*`), les répertoires de
+    travail des runs à relais (`<sandbox>/.ferme-travail/*`) et ce que le CLI y a rangé
+    (`<sandbox>/.claude/projects/<projet d'un répertoire de travail>` : transcripts et
+    résultats d'outils, des données du client). Un redémarrage saute les `finally` des
+    fils du serveur : sans ce ménage, chaque déploiement en pleine charge laisserait une
+    copie de clé d'org et des résultats sur la box. Tout par descripteur, sans suivre de lien."""
     for d in (CLES, CLES_RUN):      # `CLES` : les restes d'avant le passage en mémoire
         if d.is_dir():
             for f in d.iterdir():
@@ -682,17 +803,10 @@ def nettoyer_restes():
             slug = sandbox.name
             if sandbox.is_symlink() or not sandbox.is_dir():
                 continue
-            try:
-                fd = _ouvrir_runs(slug)
-            except Erreur:
-                continue        # `.ferme-runs` remplacé par un lien : jamais suivi
-            if fd is None:
-                continue
-            try:
-                for nom in os.listdir(fd):
-                    _effacer_sous(fd, nom)
-            finally:
-                os.close(fd)
+            effacer_dans(slug, (RUNS,))
+            effacer_dans(slug, (TRAVAIL,))
+            prefixe = projet_du_cli(home(slug) / TRAVAIL) + "-"
+            effacer_dans(slug, (".claude", "projects"), lambda nom: nom.startswith(prefixe))
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ class SousAgents(Base):
 
     def test_le_seul_outil_integre_est_la_delegation(self):
         args = self.lancer()["args"]
-        self.assertEqual(valeurs(args, "--tools"), ["Task"])
+        self.assertEqual(valeurs(args, "--tools"), ["Task,Read"])   # Read : cf. test_outils_du_run
         self.assertEqual(valeurs(args, "--permission-mode"), ["dontAsk"])
         self.assertNotIn("Bash", " ".join(args))
 
