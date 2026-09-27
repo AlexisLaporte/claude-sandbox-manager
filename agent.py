@@ -86,6 +86,21 @@ BRIDES = [
 # heure, la borne d'oto-backend. Sans demande, les 1800 s des brides. Au-delà d'une
 # heure, c'est une question de capacité de la box, pas un réglage.
 DUREE_RUN_MIN_S, DUREE_RUN_MAX_S = 60, 3600
+# Les bornes d'un run en TOURS et en DOLLARS (`--max-turns`, `--max-budget-usd`) : sans
+# elles, seule la durée arrête un modèle qui boucle ou qui délègue sans fin à des
+# sous-agents — sur la voie par clé, c'est l'org qui paie. Un run peut en demander
+# d'autres (`max_turns`, `max_budget_usd`, déclarés sur l'agent comme `max_seconds`),
+# bornées ici. Défauts : 200 tours, c'est ce que tiennent les 1800 s des brides à ~9 s
+# le tour — la durée reste la borne d'un run normal, les tours arrêtent une boucle
+# rapide ; 5 $, c'est de l'ordre d'un million de jetons d'entrée non cachés en Sonnet,
+# large pour un run de procédure, et un agent qui tourne sur Opus le déclare.
+TOURS_RUN_DEFAUT, TOURS_RUN_MAX = 200, 1000
+BUDGET_RUN_DEFAUT_USD, BUDGET_RUN_MIN_USD, BUDGET_RUN_MAX_USD = 5.0, 0.1, 50.0
+# Les sous-agents tournent sur le modèle du run, quoi que le modèle demande : sans ceci,
+# le paramètre `model` de `Task` (ou le modèle déclaré d'un agent intégré) choisit un
+# modèle plus cher que celui que l'agent a déclaré. `_FORCE` retire ce paramètre (relevé
+# sur le CLI 2.1.281) ; `inherit` = le modèle du parent.
+MODELE_DES_SOUS_AGENTS = ("CLAUDE_CODE_SUBAGENT_MODEL=inherit", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1")
 # Les runs EN VOL sur toute la box, tous sandboxes confondus : au-delà, 429. Les brides
 # donnent 500 Mo à chaque run ; la box en tient ce nombre-là, pas un de plus.
 RUNS_MAX = int(os.environ.get("FERME_RUNS_MAX", "3"))
@@ -182,6 +197,24 @@ def duree_du_run(demande):
     if isinstance(demande, bool) or not isinstance(demande, int):
         raise Erreur(400, f"max_seconds invalide : {demande!r} (un entier de secondes)")
     return max(DUREE_RUN_MIN_S, min(demande, DUREE_RUN_MAX_S))
+
+
+def tours_du_run(demande):
+    """`--max-turns` du run : les tours demandés, bornés — ou le défaut."""
+    if demande is None:
+        return TOURS_RUN_DEFAUT
+    if isinstance(demande, bool) or not isinstance(demande, int):
+        raise Erreur(400, f"max_turns invalide : {demande!r} (un entier de tours)")
+    return max(1, min(demande, TOURS_RUN_MAX))
+
+
+def budget_du_run(demande):
+    """`--max-budget-usd` du run : le budget demandé, borné — ou le défaut."""
+    if demande is None:
+        return BUDGET_RUN_DEFAUT_USD
+    if isinstance(demande, bool) or not isinstance(demande, (int, float)) or demande != demande:
+        raise Erreur(400, f"max_budget_usd invalide : {demande!r} (un montant en dollars)")
+    return max(BUDGET_RUN_MIN_USD, min(float(demande), BUDGET_RUN_MAX_USD))
 
 
 def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None,
@@ -597,7 +630,8 @@ def options_du_relais(maison, repertoire, session, config_mcp, config=None):
             *outils_du_run(maison, repertoire, session, config)]
 
 
-def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, effort=None):
+def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, effort=None,
+                tours=TOURS_RUN_DEFAUT, budget=BUDGET_RUN_DEFAUT_USD):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
     Avec `mcp` : les seuls outils du run sont ceux du relais, plus la délégation à un
@@ -607,12 +641,13 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
     config_mcp, travail, p = None, None, None
     try:
         debut = time.time()
-        args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--model", modele]
+        args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--model", modele,
+                "--max-turns", str(tours), "--max-budget-usd", f"{budget:g}"]
         if system:
             args += ["--system-prompt", system]
         if effort and effort != "none":
             args += ["--effort", effort]
-        variables = ()
+        variables = MODELE_DES_SOUS_AGENTS
         if mcp is not None:
             config_mcp = ecrire_config_mcp(slug, mcp)
             session = str(uuid.uuid4())
@@ -621,7 +656,7 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
             # s'exécute sans demander. Les deux, pas l'un ou l'autre. `run.config` : la
             # règle de `Read` suit le dossier où CE CLI range ses résultats.
             args += options_du_relais(home(slug), travail, session, config_mcp, run.config)
-            variables = (f"MAX_MCP_OUTPUT_TOKENS={MCP_JETONS_MAX}",)
+            variables += (f"MAX_MCP_OUTPUT_TOKENS={MCP_JETONS_MAX}",)
         p = dans_le_sandbox(slug, args, unite=unite, env=run.env, duree=duree,
                             config=run.config, repertoire=travail, variables=variables)
         resultat, brut = None, ""
@@ -653,7 +688,11 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
             # REFUSÉE par l'API reste « présente » : le refus est dans `erreur`.
             resume["connecte"] = ((run.env_du_run is not None or cle_presente(slug))
                                   if auth == "key" else bool(etat(slug).get("loggedIn")))
-            resume["erreur"] = (resultat or {}).get("result") or brut or "flux sans résultat"
+            # Une borne atteinte (`error_max_turns`, `error_max_budget_usd`) n'a pas de
+            # `result` : elle se dit dans `errors`, qui porte la borne.
+            resume["erreur"] = ((resultat or {}).get("result")
+                                or "; ".join((resultat or {}).get("errors") or ())
+                                or brut or "flux sans résultat")
         yield resume
     finally:
         # Flux abandonné (le worker s'est arrêté, la connexion est tombée) : le CLI
@@ -745,13 +784,15 @@ class Handler(BaseHTTPRequestHandler):
             raise Erreur(400, "prompt manquant ou vide (un texte)")
         auth = mode_auth(slug, c.get("auth"), c.get("api_key"))
         duree = duree_du_run(c.get("max_seconds"))
+        tours = tours_du_run(c.get("max_turns"))
+        budget = budget_du_run(c.get("max_budget_usd"))
         effort = c.get("effort")
         if effort is not None and not EFFORT.fullmatch(str(effort)):
             raise Erreur(400, f"effort invalide : {effort!r}")
         run = Run(slug, auth, cle_du_run=c.get("api_key"), workspace=c.get("workspace"))
         flux = flux_du_run(slug, run, prompt, c.get("model", "sonnet"),
                            system=c.get("system"), mcp=c.get("mcp"), duree=duree,
-                           effort=effort)
+                           effort=effort, tours=tours, budget=budget)
         try:
             if "application/x-ndjson" not in (self.headers.get("Accept") or ""):
                 return resume_du_run(flux)

@@ -1,4 +1,5 @@
-"""Un run à relais délègue à un sous-agent, et l'attend (claude-sandbox-manager#2).
+"""Un run à relais délègue à un sous-agent, et l'attend (claude-sandbox-manager#2) ; les
+bornes d'un run (tours, dollars, modèle des sous-agents).
 
 Ce qui ne se prouve que sur la box : un sous-agent (claude-code-guide, general-purpose)
 qui tente Bash ou WebFetch est refusé — voir la procédure du README."""
@@ -40,6 +41,78 @@ class SousAgents(Base):
         argv = popen.call_args.args[0]
         self.assertIn("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0", argv)
         self.assertEqual(argv[argv.index("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0") - 1], "-E")
+
+
+class Bornes(Base):
+    """Tours, dollars, modèle des sous-agents : un run s'arrête avant d'épuiser la clé."""
+
+    def lancer(self, evenements=None, **kw):
+        vu = {}
+
+        def sandbox(slug, args, **k):
+            vu.update(k, args=args)
+            return FauxProcessus(evenements or [init("none"), RESULTAT])
+        with mock.patch.object(agent, "dans_le_sandbox", side_effect=sandbox), \
+                mock.patch.object(agent.subprocess, "run"):
+            vu["sortie"] = list(agent.flux_du_run("bac", agent.Run("bac", "session"), "p",
+                                                  "sonnet", **kw))
+        return vu
+
+    def test_un_run_sans_demande_a_les_bornes_par_defaut(self):
+        args = self.lancer()["args"]
+        self.assertEqual(valeurs(args, "--max-turns"), [str(agent.TOURS_RUN_DEFAUT)])
+        self.assertEqual(valeurs(args, "--max-budget-usd"), ["5"])
+
+    def test_les_sous_agents_tournent_sur_le_modele_du_run(self):
+        for mcp in (None, {"url": "u", "token": "t"}):
+            with self.subTest(mcp=bool(mcp)):
+                variables = self.lancer(mcp=mcp)["variables"]
+                self.assertIn("CLAUDE_CODE_SUBAGENT_MODEL=inherit", variables)
+                self.assertIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1", variables)
+
+    def test_la_demande_est_bornee(self):
+        self.assertEqual(agent.tours_du_run(None), agent.TOURS_RUN_DEFAUT)
+        self.assertEqual(agent.tours_du_run(0), 1)
+        self.assertEqual(agent.tours_du_run(5000), agent.TOURS_RUN_MAX)
+        self.assertEqual(agent.budget_du_run(None), agent.BUDGET_RUN_DEFAUT_USD)
+        self.assertEqual(agent.budget_du_run(1000), agent.BUDGET_RUN_MAX_USD)
+        self.assertEqual(agent.budget_du_run(0), agent.BUDGET_RUN_MIN_USD)
+        self.assertEqual(agent.budget_du_run(12), 12.0)
+        for f, mauvaise in ((agent.tours_du_run, "50"), (agent.tours_du_run, 2.5),
+                            (agent.tours_du_run, True), (agent.budget_du_run, "5"),
+                            (agent.budget_du_run, False), (agent.budget_du_run, float("nan"))):
+            with self.subTest(f=f.__name__, mauvaise=mauvaise), self.assertRaises(agent.Erreur) as e:
+                f(mauvaise)
+            self.assertEqual(e.exception.statut, 400)
+
+    def test_une_demande_invalide_est_refusee_avant_de_reserver(self):
+        h = agent.Handler.__new__(agent.Handler)
+        h.headers = {}
+        with mock.patch.object(agent, "dans_le_sandbox") as sandbox, \
+                self.assertRaises(agent.Erreur):
+            h._run("bac", {"prompt": "p", "max_budget_usd": "beaucoup"})
+        sandbox.assert_not_called()
+        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+
+    def test_la_demande_du_run_arrive_au_cli(self):
+        h = agent.Handler.__new__(agent.Handler)
+        h.headers = {}
+        vu = {}
+
+        def sandbox(slug, args, **k):
+            vu["args"] = args
+            return FauxProcessus([init("none"), RESULTAT])
+        with mock.patch.object(agent, "dans_le_sandbox", side_effect=sandbox), \
+                mock.patch.object(agent.subprocess, "run"):
+            h._run("bac", {"prompt": "p", "max_turns": 30, "max_budget_usd": 2.5})
+        self.assertEqual(valeurs(vu["args"], "--max-turns"), ["30"])
+        self.assertEqual(valeurs(vu["args"], "--max-budget-usd"), ["2.5"])
+
+    def test_une_borne_atteinte_se_dit_dans_le_resume(self):
+        borne = {"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
+                 "errors": ["Reached maximum budget ($0.1)"]}
+        fin = self.lancer([init("none"), borne])["sortie"][-1]
+        self.assertEqual(fin["erreur"], "Reached maximum budget ($0.1)")
 
 
 if __name__ == "__main__":

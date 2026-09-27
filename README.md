@@ -46,7 +46,7 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 | PUT | `/api/sandboxes/{slug}/login/code` | transmet le code → état |
 | PUT | `/api/sandboxes/{slug}/key` | pose (ou remplace) une clé d'API `{api_key}` → état |
 | DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
-| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine |
+| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?, max_turns?, max_budget_usd?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine |
 
 `mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors que deux outils intégrés, la délégation à un
 **sous-agent** (`Task` : même processus, même unité, même clé, même relais) et `Read` borné (ci-dessous), et les outils du relais MCP
@@ -122,6 +122,16 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
 tient la même échéance sur le flux et ferme la connexion quand elle tombe — ce qui arrête
 déjà l'unité (le `finally` du flux) : la durée de l'unité est le filet, pas le geste.
 
+**Bornes d'un run** (tous les runs) : `max_turns` → `--max-turns` (défaut 200, borné à 1–1000) et
+`max_budget_usd` → `--max-budget-usd` (défaut 5 $, borné à 0,1–50 $), surchargeables par run comme
+`max_seconds`. 200 tours, c'est ce que tiennent les 1800 s des brides à ~9 s le tour : la durée reste la
+borne d'un run normal, les tours arrêtent une boucle rapide. 5 $ : de l'ordre d'un million de jetons
+d'entrée non cachés en Sonnet, large pour un run de procédure ; un agent qui tourne sur Opus le déclare.
+Une borne atteinte finit le run en `error_max_turns` / `error_max_budget_usd`, que `ferme_resume.erreur`
+reprend. Les sous-agents tournent sur le modèle du run (`CLAUDE_CODE_SUBAGENT_MODEL=inherit` et
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` : le paramètre `model` de `Task` est retiré), jamais sur un modèle
+plus cher choisi par le modèle.
+
 Tests hors box : `python3 -m unittest discover -s tests -p 'test_*.py'`. **À vérifier sur la box** avant
 usage : `systemd-run -p EnvironmentFile=…` accepté pour une unité éphémère et lu malgré
 `InaccessiblePaths=/etc/ferme` et `/run/ferme` ; `ProtectProc=invisible` accepté par l'unité éphémère,
@@ -131,7 +141,9 @@ sandbox qui a les deux, un run `key` annonce `ANTHROPIC_API_KEY` et un run `sess
 **Avant de servir `Read`** : `python3 tests/banc_read.py /usr/bin/claude` sur la box, en root puis
 en `sandbox-*` (sortie 0 = conforme ; passé sur macOS / CLI 2.1.281 — `/proc/self/environ`, qui
 porte la clé d'un run par clé, n'est pas encore prouvé refusé sous Linux). Et un sous-agent
-(`claude-code-guide`, `general-purpose`) à qui l'on fait tenter Bash puis WebFetch est refusé.
+(`claude-code-guide`, `general-purpose`) à qui l'on fait tenter Bash puis WebFetch est refusé. Un run
+qui délègue voit son sous-agent sur le modèle du run (`modelUsage` du `result`), et un `max_budget_usd`
+bas l'arrête en `error_max_budget_usd` sous-agents compris.
 
 `GET /` sert `index.html`, la page qui joue le futur écran du dashboard.
 
