@@ -62,6 +62,7 @@
   <p>Donne une consigne : elle tourne sur le serveur, sur ton abonnement, sans toi.</p>
   <textarea id="prompt" rows="3">Réponds en une phrase : quel jour sommes-nous, et sur quel modèle tournes-tu ?</textarea>
   <select id="modele" style="margin-top:8px"><option>sonnet</option><option>haiku</option><option>opus</option></select>
+  <select id="auth" style="margin-top:8px"><option value="session">Payé par l'abonnement</option><option value="key">Payé par la clé d'API</option></select>
   <button onclick="lancer()">Lancer</button>
   <div id="resultat"></div>
 </div>
@@ -74,6 +75,9 @@
   <button class="lien" onclick="demarrer()">Relire l'état</button> ·
   <button class="lien" onclick="detruire()">Déconnecter et détruire le sandbox</button> ·
   <button class="lien" onclick="oublierJeton()">Changer de jeton</button>
+  <label>Clé d'API (optionnelle, en plus de l'abonnement)</label><input id="cle" type="password" placeholder="sk-ant-api…" autocomplete="off">
+  <button class="lien" onclick="poserCle()">Poser la clé</button> ·
+  <button class="lien" onclick="retirerCle()">Retirer la clé</button>
   <pre id="brut"></pre>
 </details>
 
@@ -109,8 +113,8 @@ async function demarrer() {
   if (!jeton) return afficher('e-reglages');
   try {
     const d = await appel('GET', '');
-    if (d.loggedIn) {
-      $('compte').textContent = [d.email, d.subscriptionType].filter(Boolean).join(' · ') || 'connecté';
+    if (d.loggedIn || d.apiKey) {
+      $('compte').textContent = [d.email, d.subscriptionType, d.apiKey && 'clé d\'API'].filter(Boolean).join(' · ') || 'connecté';
       afficher('e-pret');
     } else afficher('e-connecter');
   } catch (e) {
@@ -146,19 +150,27 @@ async function validerCode() {
 async function lancer() {
   $('resultat').innerHTML = '<p style="margin-top:12px;color:var(--doux)">Claude travaille sur le serveur…</p>';
   try {
-    const d = await appel('POST', '/runs', { prompt: $('prompt').value, model: $('modele').value });
+    const d = await appel('POST', '/runs', { prompt: $('prompt').value, model: $('modele').value, auth: $('auth').value });
     const f = d.forfait || {}, w = f.unifiedWindows || {};
     const pct = x => x && x.utilization != null ? `${Math.round(x.utilization * 100)} %` : '—';
     $('resultat').innerHTML = '';
     const rep = Object.assign(document.createElement('div'), { className: 'reponse', textContent: d.resultat });
     const dl = document.createElement('dl');
-    [['Payé par', d.apiKeySource === 'none' ? 'ton abonnement (aucune clé d\'API)' : d.apiKeySource],
+    [['Payé par', d.apiKeySource === 'none' ? 'ton abonnement (aucune clé d\'API)'
+                 : d.apiKeySource === 'ANTHROPIC_API_KEY' ? 'la clé d\'API du sandbox' : d.apiKeySource],
      ['Modèle', d.modele], ['Durée', `${d.duree_s} s`],
      ['Forfait 5 h', pct(w.five_hour)], ['Forfait 7 j', pct(w.seven_day)]]
       .forEach(([k, v]) => dl.append(Object.assign(document.createElement('dt'), { textContent: k }),
                                       Object.assign(document.createElement('dd'), { textContent: v })));
     $('resultat').append(Object.assign(document.createElement('div'), { style: 'margin-top:12px' }), rep, dl);
   } catch (e) { $('resultat').innerHTML = ''; echec(e); }
+}
+async function poserCle() {
+  try { await appel('PUT', '', undefined); await appel('PUT', '/key', { api_key: $('cle').value.trim() }); $('cle').value = ''; demarrer(); }
+  catch (e) { echec(e); }
+}
+async function retirerCle() {
+  try { await appel('DELETE', '/key'); demarrer(); } catch (e) { echec(e); }
 }
 async function detruire() {
   if (!confirm('Déconnecter ton abonnement et détruire ce sandbox ?')) return;
