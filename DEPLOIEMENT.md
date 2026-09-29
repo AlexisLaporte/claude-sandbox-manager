@@ -39,15 +39,17 @@ sur une box à soi. Quatre pièces : **une box**, **l'agent des sandboxes** (ce 
 (`deploy/secrets/ferme-secrets`, lancé en `ExecStartPre` par les drop-ins `20-secrets.conf`), qui les
 écrit dans `/run/ferme-secrets/` (tmpfs, 600). Échec fermé : secret introuvable, le service ne démarre pas.
 
-1. Un **projet Scaleway dédié** à la box, et dedans deux secrets (chemin `/`) :
+1. Un **projet Scaleway dédié** à la box, et dedans ses secrets (chemin `/`) :
    - `ferme-token` : le jeton de l'agent, que vous générez (`openssl rand -hex 24`) — le backend le
      reçoit aussi (§4) ;
-   - `oto-worker-secret-abonnement` : le secret machine du worker (§5).
+   - `oto-worker-secret-abonnement` : le secret machine du worker d'abonnement (§5) ;
+   - `oto-worker-secret-ferme` : celui du worker `claude-farm` (§5 bis), si vous le posez — un secret
+     PROPRE, jamais celui de l'abonnement : révoquer l'un ne coupe pas l'autre.
 2. Une **application IAM** en lecture seule sur ce seul projet (`SecretManagerReadOnly` +
    `SecretAccess`), et sa clé sur la box dans `/etc/ferme-secrets/scw-key` (600) :
    `SCW_ACCESS_KEY=…`, `SCW_SECRET_KEY=…`, `SCW_PROJECT_ID=…`, et `SCW_REGION=…` si ce n'est pas fr-par.
-3. `bash deploy/secrets.sh <hôte-ssh>` pose le chargeur et les drop-ins, puis tire les deux profils
-   pour vérifier.
+3. `bash deploy/secrets.sh <hôte-ssh>` pose le chargeur et les drop-ins, puis tire les profils
+   (`agent`, `worker`, `worker-farm`) pour vérifier.
 
 Tourner un secret = nouvelle version dans le Secret Manager, puis redémarrer le service. Copie de
 référence dans votre coffre (1Password…).
@@ -92,6 +94,32 @@ bash deploy/worker.sh <hôte-ssh> <url-du-backend> [<n°>]
 
 Le journal doit dire `worker armé — … provider abonnement · modèle sub:sonnet`. Un second worker
 (`<n°>` = 2) double les runs simultanés — dans la limite de la mémoire (§1).
+
+## 5 bis. Le worker `claude-farm` (Claude Code sur la clé de l'org)
+
+Il sert la famille `anthropic` en faisant tourner chaque travail en Claude Code dans le sandbox de
+l'org du travail, payé par la clé API **que l'org a déposée** : il ne tient aucune clé à lui
+(`OTO_RUNNER_ORG_KEYS_ONLY=1`, exigé — sinon refus au démarrage), la plateforme ne paie aucun run.
+
+1. Secret machine **propre** : `oto_admin_runner_worker op=create label="ferme claude-farm"` — montré
+   une fois ; le poser aussitôt dans le Secret Manager (`oto-worker-secret-ferme`) et dans le coffre.
+   Un worker n'a pas d'org : ce qu'il sert se borne par `OTO_RUNNER_ORGS` (étape 3).
+2. `bash deploy/secrets.sh <hôte-ssh>` (pose le drop-in `oto-runner-farm@.service.d/20-secrets.conf`
+   et vérifie le profil `worker-farm`), puis l'unité :
+   `scp deploy/oto-runner-farm.service <hôte>:/etc/systemd/system/oto-runner-farm@.service`.
+3. `/etc/oto-runner/farm.env` (0600, `oto-runner`) sur le modèle de `deploy/farm.env.exemple`, avec
+   `OTO_RUNNER_ORGS` = les orgs à essayer (séparées par des virgules). Absent = toutes : ne l'omettre
+   qu'une fois le moteur ouvert au parc.
+4. `bash deploy/oto-runner.sh <hôte-ssh> <checkout d'oto-runner>` si le code a bougé (un seul venv :
+   les deux workers sont relancés), puis `systemctl daemon-reload && systemctl enable --now
+   oto-runner-farm@1`.
+
+Le journal doit dire `worker armé — … provider ferme`. Les places de la box (`FERME_RUNS_MAX`)
+sont partagées avec l'abonnement.
+
+⚠️ `OTO_RUNNER_ORGS` **restreint** ce worker, il ne détourne rien : les autres workers de la famille
+`anthropic` (ceux de la plateforme) servent toujours les mêmes orgs. Un travail va au premier qui le
+réserve.
 
 ## 6. Ouvrir à des personnes
 

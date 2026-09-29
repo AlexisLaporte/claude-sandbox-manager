@@ -1,0 +1,41 @@
+# Worker oto-runner `claude-farm` — sur la box de la ferme.
+# Il réserve les travaux de la famille `anthropic` et les fait tourner en Claude Code dans le
+# sandbox de l'org du travail, par l'agent de la box (OTO_FERME_URL), payés par la clé API que
+# l'org a déposée (OTO_RUNNER_ORG_KEYS_ONLY=1) : il ne détient AUCUNE clé de modèle, et la
+# plateforme ne paie aucun run.
+#
+# Non-root, comme le worker d'abonnement : /etc/oto-runner (sa config) est invisible des
+# sandboxes (InaccessiblePaths de l'agent) ; son secret `otow_` vient du Secret Manager au
+# démarrage (drop-in 20-secrets.conf, profil `worker-farm`).
+#
+# Arrêt gracieux : SIGTERM = ne plus réserver, finir, sortir. La patience suit le plafond d'un
+# run de la ferme (`max_seconds` jusqu'à 3600 s côté agent), plus une marge : un run coupé en
+# vol serait repris par un pair pendant que le CLI tourne encore dans le sandbox.
+[Unit]
+Description=oto-runner worker claude-farm %i (ferme)
+After=network-online.target ferme-agent.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=oto-runner
+Group=oto-runner
+EnvironmentFile=/etc/oto-runner/farm.env
+# Les journaux de passage (`passages/`, relatif au répertoire courant) : un dossier
+# d'état à l'instance, seul endroit inscriptible sous ProtectSystem=strict.
+StateDirectory=oto-runner-farm/%i
+WorkingDirectory=/var/lib/oto-runner-farm/%i
+ExecStart=/srv/oto-runner/.venv/bin/python -m oto_runner.worker
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=61min
+SyslogIdentifier=oto-runner-farm-%i
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

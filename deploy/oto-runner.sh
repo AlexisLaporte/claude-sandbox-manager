@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Pose oto-runner sur la box de la ferme : bash deploy/oto-runner.sh <hôte-ssh> <checkout oto-runner>
 # Deux usages d'un même code : le relais MCP lancé DANS les sandboxes (d'où /srv, lisible par eux —
-# /opt leur est invisible) et le worker `claude-subscription`, sous l'utilisateur `oto-runner`.
+# /opt leur est invisible) et les workers `claude-subscription` et `claude-farm`, sous l'utilisateur
+# `oto-runner` — un seul venv : le mettre à jour relance les deux.
 set -euo pipefail
 HOTE_SSH=$1 CHECKOUT=$2
 ssh "$HOTE_SSH" mkdir -p /srv/oto-runner/src
@@ -16,5 +17,5 @@ id oto-runner >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/
 chown -R root:root /srv/oto-runner && chmod -R a+rX /srv/oto-runner
 /srv/oto-runner/.venv/bin/python -c "import oto_runner.relais_mcp, oto_runner.agent_abonnement; print('oto-runner posé')"
 # Un worker déjà lancé garde l'ancien code en mémoire : on le relance (arrêt gracieux, cf. l'unité).
-systemctl try-restart 'oto-runner-abonnement@*' && echo "workers relancés"
+systemctl try-restart 'oto-runner-abonnement@*' 'oto-runner-farm@*' && echo "workers relancés"
 DISTANT
