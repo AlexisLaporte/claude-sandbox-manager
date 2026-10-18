@@ -55,8 +55,10 @@ RELAIS_PYTHON = os.environ["FERME_RELAIS_PYTHON"]
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 URL_LOGIN = re.compile(r"https://claude\.com/cai/oauth/authorize\S+")
 # Une clé d'API de la Console, et rien d'autre : la forme est aussi ce qui garantit que la
-# ligne écrite dans l'EnvironmentFile ne peut pas en porter une seconde.
-CLE_API = re.compile(r"^sk-ant-api[A-Za-z0-9_-]{20,300}$")
+# ligne écrite dans l'EnvironmentFile ne peut pas en porter une seconde. La Console émet
+# deux formes : `sk-ant-api…` et, depuis octobre 2026, `sk-ant-usr…` (acceptée par l'API
+# en `x-api-key`, vérifié le 18/10/2026).
+CLE_API = re.compile(r"^sk-ant-(api|usr)[A-Za-z0-9_-]{20,300}$")
 # Le jeton d'une session claude.ai (`sk-ant-oat…`) n'est PAS une clé : le poser ici serait
 # intermédier un identifiant claude.ai, ce qu'Anthropic interdit. Une session se connecte
 # par `/login`, par la personne elle-même.
@@ -287,7 +289,7 @@ def ecrire_env(chemin, cle, workspace=None):
         raise Erreur(422, "ceci est le jeton d'une session claude.ai, pas une clé d'API — "
                           "une session se connecte par /login")
     if not CLE_API.fullmatch(cle):
-        raise Erreur(422, "clé d'API invalide : une clé de la Console Anthropic (sk-ant-api…) est attendue")
+        raise Erreur(422, "clé d'API invalide : une clé de la Console Anthropic (sk-ant-api… ou sk-ant-usr…) est attendue")
     if workspace is not None and not WORKSPACE.fullmatch(workspace):
         raise Erreur(422, "workspace invalide")
     chemin.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

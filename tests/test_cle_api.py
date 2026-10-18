@@ -101,8 +101,14 @@ class PoseDeLaCle(Base):
         self.assertIn("/login", str(e.exception))
         self.assertFalse(agent.cle_presente("bac"))
 
+    def test_accepte_une_cle_sk_ant_usr(self):
+        usr = "sk-ant-usr-" + "A1b2_C3d4-" * 8
+        agent.ecrire_cle("bac", usr)
+        self.assertEqual(agent.fichier_cle("bac").read_text(), f"ANTHROPIC_API_KEY={usr}\n")
+
     def test_refuse_ce_qui_n_est_pas_une_cle(self):
-        for mauvaise in ("", "abc", CLE + "\nFERME_TOKEN=vole", CLE + " x", "sk-ant-api"):
+        for mauvaise in ("", "abc", CLE + "\nFERME_TOKEN=vole", CLE + " x", "sk-ant-api",
+                         "sk-ant-usr", "sk-ant-usr-" + "x" * 40 + "\nFERME_TOKEN=vole"):
             with self.subTest(mauvaise=mauvaise), self.assertRaises(agent.Erreur) as e:
                 agent.ecrire_cle("bac", mauvaise)
             self.assertEqual(e.exception.statut, 422)

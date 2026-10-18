@@ -86,7 +86,7 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
   `EnvironmentFile=` de l'unité — jamais en argv (lisible de tous dans `/proc`), jamais dans le HOME
   (systemd lit ce fichier en root et suit les liens : un sandbox pourrait y substituer un lien vers un
   secret de la box).
-- **Ce qui est refusé** : tout ce qui n'est pas `sk-ant-api…` (422), et nommément un jeton de session
+- **Ce qui est refusé** : tout ce qui n'est pas `sk-ant-api…` ou `sk-ant-usr…` (422), et nommément un jeton de session
   `sk-ant-oat…` — intermédier un identifiant claude.ai est interdit par Anthropic ; une session se
   connecte par `/login`.
 - **Le CLI doit confirmer** : `system/init.apiKeySource` doit valoir `ANTHROPIC_API_KEY` pour un run par
