@@ -64,10 +64,13 @@ class OutilsDuRun(unittest.TestCase):
         self.assertIn("Read(//srv/sandboxes/alice/.claude/.credentials.json)",
                       _valeurs(args, "--disallowedTools"), "la session claude.ai reste refusée")
 
-    def test_options_du_relais_portent_la_session_et_la_consigne(self):
-        args = agent.options_du_relais(MAISON, TRAVAIL, SESSION, "/tmp/mcp.json")
+    def test_options_du_relais_portent_la_session_et_la_consigne_par_fichier(self):
+        consigne = MAISON / agent.CONSIGNES / "1" / "lecture.txt"
+        args = agent.options_du_relais(MAISON, TRAVAIL, SESSION, "/tmp/mcp.json", consigne)
         self.assertEqual(_valeurs(args, "--session-id"), [SESSION])
-        self.assertEqual(_valeurs(args, "--append-system-prompt"), [agent.CONSIGNE_LECTURE])
+        self.assertEqual(_valeurs(args, "--append-system-prompt-file"), [str(consigne)])
+        self.assertNotIn("--append-system-prompt", args)
+        self.assertNotIn(agent.CONSIGNE_LECTURE, args)
         self.assertIn("--strict-mcp-config", args)
 
     def test_le_repertoire_de_travail_n_est_pas_le_home(self):

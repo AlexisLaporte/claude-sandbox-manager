@@ -78,9 +78,14 @@ BRIDES = [
     "100.64.0.0/10 fc00::/7 fe80::/10",
     # Le résolveur est systemd-resolved sur localhost : sans lui, pas de DNS, pas d'Anthropic.
     "IPAddressAllow=127.0.0.53/32 127.0.0.54/32",
-    f"InaccessiblePaths=-/opt -/etc/ferme -{CLES_RUN.parent} -/etc/oto-runner -/var/lib/postgresql",
-    # Le prompt et le `--system-prompt` passent en argv : sans ceci, tout processus de la
-    # box les lirait dans /proc/*/cmdline — ceux des AUTRES orgs compris.
+    # `/run/dbus` et les sockets de systemd : par D-Bus, tout utilisateur de la box liste
+    # les unités et lit leur `ExecStart` et leur description — celles des runs des AUTRES
+    # orgs comprises. Un sandbox ne parle jamais au gestionnaire. `/run/systemd/resolve`
+    # reste : `/etc/resolv.conf` y pointe.
+    f"InaccessiblePaths=-/opt -/etc/ferme -{CLES_RUN.parent} -/etc/oto-runner -/var/lib/postgresql "
+    "-/run/dbus -/run/systemd/private -/run/systemd/io.systemd.Manager",
+    # Aucun texte d'un run ne passe plus en argv (`dans_le_sandbox`) ; /proc reste caché
+    # entre sandboxes quand même.
     "ProtectProc=invisible", "ProcSubset=pid",
     "RuntimeMaxSec=1800",   # un run qui ne rend jamais la main ne tient pas le sandbox indéfiniment
 ]
@@ -143,8 +148,14 @@ CONSIGNE_LECTURE = (
     "ni Python dans ce run.")
 
 # Les dossiers que l'agent crée, en root, dans le HOME du sandbox : les configs des runs
-# par clé, et les répertoires de travail des runs à relais.
-RUNS, TRAVAIL = ".ferme-runs", ".ferme-travail"
+# par clé, les répertoires de travail des runs à relais, et les textes d'un run qui ne
+# passent ni par l'argv ni par stdin (`ecrire_consignes`).
+RUNS, TRAVAIL, CONSIGNES = ".ferme-runs", ".ferme-travail", ".ferme-consignes"
+
+#: Un élément de l'argv du CLI : un drapeau ou un identifiant, jamais un texte. L'argv
+#: d'une unité se lit par D-Bus (`systemctl show`), dans /proc et dans le journal ; une
+#: consigne, un prompt système ou un texte de run y serait lisible par toute la box.
+ELEMENT_D_ARGV = re.compile(r"\S+")
 
 ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
@@ -219,9 +230,19 @@ def budget_du_run(demande):
     return max(BUDGET_RUN_MIN_USD, min(float(demande), BUDGET_RUN_MAX_USD))
 
 
+def description(slug):
+    """La description de l'unité : des identifiants. Sans elle, systemd prend la ligne de
+    commande — et l'écrit dans `list-units` et le journal."""
+    return f"ferme:{slug}"
+
+
 def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None,
-                    repertoire=None, variables=()):
+                    repertoire=None, variables=(), entree=None):
     """Commande exécutée comme la personne, dans une unité éphémère bridée.
+
+    `args` : des drapeaux et des identifiants seulement (`ELEMENT_D_ARGV`), refusés sinon.
+    Un texte du run passe par `entree` (écrite sur stdin, puis fermée) ou par un fichier
+    (`ecrire_consignes`).
 
     `env` : un fichier de `CLES` (la clé d'API, le workspace) qui entre dans
     l'environnement de l'unité par `EnvironmentFile=` — lu par systemd, jamais dans
@@ -229,8 +250,12 @@ def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None,
     `config` : un `CLAUDE_CONFIG_DIR` propre au run (runs par clé, cf. `Run`).
     `repertoire` : le répertoire de travail (le HOME par défaut). `variables` : des
     `NOM=valeur` de plus, en argv — donc jamais un secret."""
+    texte = next((a for a in args if not ELEMENT_D_ARGV.fullmatch(a)), None)
+    if texte is not None:
+        raise Erreur(500, "un texte en argv est refusé : il passe par stdin ou par un "
+                          "fichier (consigne, prompt système)")
     cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect",
-           *([f"--unit={unite}"] if unite else []),
+           *([f"--unit={unite}"] if unite else []), f"--description={description(slug)}",
            f"--uid={utilisateur(slug)}", f"--gid={utilisateur(slug)}",
            f"--working-directory={repertoire or home(slug)}",
            f"-p", f"ReadWritePaths={home(slug)}",
@@ -250,8 +275,22 @@ def dans_le_sandbox(slug, args, unite=None, env=None, duree=None, config=None,
     if duree is not None:
         # APRÈS les brides : pour une même propriété, la dernière affectation gagne.
         cmd += ["-p", f"RuntimeMaxSec={duree}"]
-    return subprocess.Popen(cmd + [CLAUDE, *args], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    p = subprocess.Popen(cmd + [CLAUDE, *args], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if entree is not None:
+        p.stdin.write(entree)
+        p.stdin.close()
+    return p
+
+
+def unite_conforme(unite, slug, args):
+    """L'unité lancée ne porte que ce que l'agent a passé : la commande attendue (des
+    identifiants, `dans_le_sandbox`) et sa description. Lu après le lancement, par
+    `systemctl show` — ce que n'importe quel utilisateur de la box en verrait."""
+    vu = subprocess.run(["systemctl", "show", unite, "-p", "ExecStart", "-p", "Description"],
+                        capture_output=True, text=True, timeout=10).stdout
+    return (f"argv[]={' '.join([CLAUDE, *args])} ;" in vu
+            and f"Description={description(slug)}" in vu.splitlines())
 
 
 def etat(slug):
@@ -576,6 +615,34 @@ def reserver(slug):
     return verrou
 
 
+def ecrire_consignes(slug, textes):
+    """Les textes d'un run qui ne passent pas par stdin (le prompt système, la consigne
+    de lecture) : un fichier chacun, 0600 à la personne, dans
+    `<HOME>/.ferme-consignes/<id>/`, effacé en fin de run (`effacer_consignes`) et au
+    démarrage. Écrits par le descripteur du dossier, sans suivre de lien. Rend
+    `(dossier, {nom: chemin})`."""
+    ident = uuid.uuid4().hex
+    dossier = creer_dossier_du_run(slug, CONSIGNES, ident)
+    compte = pwd.getpwnam(utilisateur(slug))
+    fd = _ouvrir_dossier(slug, CONSIGNES, ident)
+    chemins = {}
+    try:
+        for nom, texte in textes.items():
+            f = os.open(nom, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                        dir_fd=fd)
+            with os.fdopen(f, "w") as sortie:
+                os.fchown(sortie.fileno(), compte.pw_uid, compte.pw_gid)
+                sortie.write(texte)
+            chemins[nom] = dossier / nom
+    finally:
+        os.close(fd)
+    return dossier, chemins
+
+
+def effacer_consignes(slug, dossier):
+    effacer_dans(slug, (CONSIGNES,), lambda nom: nom == dossier.name)
+
+
 def ecrire_config_mcp(slug, mcp):
     """La config MCP du run : le relais d'oto-runner, lancé DANS le sandbox par le CLI.
 
@@ -624,12 +691,13 @@ def outils_du_run(maison, repertoire, session, config=None):
             "--permission-mode", "dontAsk"]
 
 
-def options_du_relais(maison, repertoire, session, config_mcp, config=None):
+def options_du_relais(maison, repertoire, session, config_mcp, consigne, config=None):
     """Tout ce qu'un run à relais ajoute à `claude -p` — la MÊME fonction sert le run et
-    le banc (`tests/banc_read.py`), pour que le banc éprouve les options réelles."""
+    le banc (`tests/banc_read.py`), pour que le banc éprouve les options réelles.
+    `consigne` : le fichier qui porte `CONSIGNE_LECTURE` (`ecrire_consignes`)."""
     return ["--mcp-config", str(config_mcp), "--strict-mcp-config",
             "--session-id", session,
-            "--append-system-prompt", CONSIGNE_LECTURE,
+            "--append-system-prompt-file", str(consigne),
             *outils_du_run(maison, repertoire, session, config)]
 
 
@@ -641,13 +709,18 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
     sous-agent (`OUTILS_INTEGRES`) ; aucune config utilisateur. `run` tient ce que le run a réservé (`Run`) ; tout est
     rendu quoi qu'il arrive."""
     auth, unite = run.auth, run.unite
-    config_mcp, travail, p = None, None, None
+    config_mcp, travail, consignes, p = None, None, None, None
     try:
         debut = time.time()
-        args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--model", modele,
+        # Le prompt passe sur stdin (`entree`), les autres textes par fichier : jamais en argv.
+        args = ["-p", "--output-format", "stream-json", "--verbose", "--model", modele,
                 "--max-turns", str(tours), "--max-budget-usd", f"{budget:g}"]
+        textes = {**({"systeme.txt": system} if system else {}),
+                  **({"lecture.txt": CONSIGNE_LECTURE} if mcp is not None else {})}
+        if textes:
+            consignes, fichiers = ecrire_consignes(slug, textes)
         if system:
-            args += ["--system-prompt", system]
+            args += ["--system-prompt-file", str(fichiers["systeme.txt"])]
         if effort and effort != "none":
             args += ["--effort", effort]
         variables = MODELE_DES_SOUS_AGENTS
@@ -658,10 +731,12 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
             # ⚠️ `--tools` borne les outils intégrés SERVIS ; `--allowedTools` dit ce qui
             # s'exécute sans demander. Les deux, pas l'un ou l'autre. `run.config` : la
             # règle de `Read` suit le dossier où CE CLI range ses résultats.
-            args += options_du_relais(home(slug), travail, session, config_mcp, run.config)
+            args += options_du_relais(home(slug), travail, session, config_mcp,
+                                      fichiers["lecture.txt"], run.config)
             variables += (f"MAX_MCP_OUTPUT_TOKENS={MCP_JETONS_MAX}",)
         p = dans_le_sandbox(slug, args, unite=unite, env=run.env, duree=duree,
-                            config=run.config, repertoire=travail, variables=variables)
+                            config=run.config, repertoire=travail, variables=variables,
+                            entree=prompt)
         resultat, brut = None, ""
         for ligne in p.stdout:
             try:
@@ -670,6 +745,14 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
                 brut = ligne.strip() or brut     # stderr du CLI : gardé pour dire l'échec
                 continue
             if ev.get("type") == "system" and ev.get("subtype") == "init":
+                if not unite_conforme(unite, slug, args):
+                    subprocess.run(["systemctl", "stop", unite])
+                    p.wait(timeout=30)
+                    yield {"type": "ferme_resume", "duree_s": round(time.time() - debut, 1),
+                           "code": p.returncode, "auth": auth, "connecte": True,
+                           "erreur": "argv_non_conforme : l'unité ne porte pas la seule "
+                                     "commande attendue — arrêtée avant tout tour"}
+                    return
                 source = ev.get("apiKeySource")
                 if source != SOURCE_ATTENDUE[auth]:
                     subprocess.run(["systemctl", "stop", unite])
@@ -707,6 +790,8 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
             p.wait(timeout=30)
         if config_mcp is not None:
             config_mcp.unlink(missing_ok=True)
+        if consignes is not None:
+            effacer_consignes(slug, consignes)
         if travail is not None:
             # AVANT `liberer` : le transcript d'un run par clé vit dans sa config, que
             # `liberer` efface — l'ordre inverse chercherait un dossier déjà parti.
@@ -832,7 +917,8 @@ class Handler(BaseHTTPRequestHandler):
 def nettoyer_restes():
     """Au démarrage : ce qu'un arrêt en plein run a laissé — les clés remises avec un run
     (`CLES/*.run-*`), les configs de run (`<sandbox>/.ferme-runs/*`), les répertoires de
-    travail des runs à relais (`<sandbox>/.ferme-travail/*`) et ce que le CLI y a rangé
+    travail des runs à relais (`<sandbox>/.ferme-travail/*`), les textes des runs
+    (`<sandbox>/.ferme-consignes/*`) et ce que le CLI y a rangé
     (`<sandbox>/.claude/projects/<projet d'un répertoire de travail>` : transcripts et
     résultats d'outils, des données du client). Un redémarrage saute les `finally` des
     fils du serveur : sans ce ménage, chaque déploiement en pleine charge laisserait une
@@ -849,6 +935,7 @@ def nettoyer_restes():
                 continue
             effacer_dans(slug, (RUNS,))
             effacer_dans(slug, (TRAVAIL,))
+            effacer_dans(slug, (CONSIGNES,))
             prefixe = projet_du_cli(home(slug) / TRAVAIL) + "-"
             effacer_dans(slug, (".claude", "projects"), lambda nom: nom.startswith(prefixe))
 
