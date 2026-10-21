@@ -54,7 +54,9 @@ class Base(unittest.TestCase):
     def setUp(self):
         for p in (mock.patch.object(agent.pwd, "getpwnam", return_value=COMPTE),
                   mock.patch.object(agent, "etat", side_effect=lambda slug: {
-                      "loggedIn": True, "apiKey": agent.cle_presente(slug)})):
+                      "loggedIn": True, "apiKey": agent.cle_presente(slug)}),
+                  # Le contrôle de l'unité lancée lit systemd (`test_argv_sans_texte`).
+                  mock.patch.object(agent, "unite_conforme", return_value=True)):
             p.start()
             self.addCleanup(p.stop)
         agent.fichier_cle("bac").unlink(missing_ok=True)
@@ -458,6 +460,8 @@ class DurcissementsDeLaBox(Base):
         brides = " ".join(agent.BRIDES)
         self.assertIn(f"-{agent.CLES_RUN.parent}", brides)
         self.assertIn("ProtectProc=invisible", agent.BRIDES)
+        for chemin in ("-/run/dbus", "-/run/systemd/private"):
+            self.assertIn(chemin, brides, "un sandbox ne parle jamais au gestionnaire")
 
 
 if __name__ == "__main__":

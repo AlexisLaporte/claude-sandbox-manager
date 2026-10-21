@@ -137,7 +137,7 @@ Tests hors box : `python3 -m unittest discover -s tests -p 'test_*.py'`. **À v�
 usage : `systemd-run -p EnvironmentFile=…` accepté pour une unité éphémère et lu malgré
 `InaccessiblePaths=/etc/ferme` et `/run/ferme` ; `ProtectProc=invisible` accepté par l'unité éphémère,
 et un run ne voit plus le `cmdline` des runs d'une autre org ; aucun `sk-ant-api` dans
-`ps`/`/proc/*/cmdline` pendant un run ; sur un
+`ps`/`/proc/*/cmdline` pendant un run ; `python3 tests/isolation.py <slug>` (brides réelles) dit « unités refusées », « ExecStart d'une autre unité refusées », « D-Bus refusé » et « unité conforme » — **aucun texte d'un run en argv** : le prompt passe sur stdin, le prompt système et la consigne de lecture par des fichiers 0600 du sandbox (`.ferme-consignes/<id>/`), effacés en fin de run ; sur un
 sandbox qui a les deux, un run `key` annonce `ANTHROPIC_API_KEY` et un run `session` annonce `none`.
 **Avant de servir `Read`** : `python3 tests/banc_read.py /usr/bin/claude` sur la box, en root puis
 en `sandbox-*` (sortie 0 = conforme ; passé sur macOS / CLI 2.1.281 — `/proc/self/environ`, qui

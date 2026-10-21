@@ -173,12 +173,16 @@ def banc():
            "ANTHROPIC_API_KEY": "sk-ant-api03-banc", "DISABLE_AUTOUPDATER": "1",
            "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0",
            "MAX_MCP_OUTPUT_TOKENS": str(agent.MCP_JETONS_MAX)}
-    # Comme `flux_du_run` : `--system-prompt` (la procédure, que le runner envoie
-    # toujours) PUIS les options du relais, dont `--append-system-prompt`.
-    argv = [CLI, "-p", "go", "--output-format", "stream-json", "--verbose", "--model", "claude-sonnet-5",
-            "--system-prompt", MARQUE_PROCEDURE,
-            *agent.options_du_relais(maison, travail, session, mcp)]
-    subprocess.run(argv, cwd=travail, env=env, stdin=subprocess.DEVNULL,
+    # Comme `flux_du_run` : le prompt sur stdin, `--system-prompt-file` (la procédure,
+    # que le runner envoie toujours) PUIS les options du relais, dont
+    # `--append-system-prompt-file`. Aucun texte en argv.
+    procedure, consigne = travail / "systeme.txt", travail / "lecture.txt"
+    procedure.write_text(MARQUE_PROCEDURE)
+    consigne.write_text(agent.CONSIGNE_LECTURE)
+    argv = [CLI, "-p", "--output-format", "stream-json", "--verbose", "--model", "claude-sonnet-5",
+            "--system-prompt-file", str(procedure),
+            *agent.options_du_relais(maison, travail, session, mcp, consigne)]
+    subprocess.run(argv, cwd=travail, env=env, input="go", text=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
     srv.shutdown()
 

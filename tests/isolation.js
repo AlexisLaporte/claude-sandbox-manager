@@ -1,4 +1,19 @@
 const net = require("net"), fs = require("fs"), https = require("https");
+const { spawnSync } = require("child_process");
+// Un sandbox ne parle jamais au gestionnaire : ni lister les unités, ni lire l'ExecStart
+// d'une autre (celui d'un run porterait sa commande), ni joindre D-Bus.
+const gestionnaire = () => {
+  for (const [etiquette, args] of [["unités", ["list-units", "--no-legend"]],
+                                   ["ExecStart d'une autre unité", ["show", "cron.service", "-p", "ExecStart"]]]) {
+    const r = spawnSync("/usr/bin/systemctl", args, { encoding: "utf8", timeout: 10000 });
+    console.log(r.status === 0 && r.stdout.trim() ? `${etiquette} LISIBLES` : `${etiquette} refusées`);
+  }
+  return new Promise(r => {
+    const s = net.connect("/run/dbus/system_bus_socket");
+    s.on("connect", () => { console.log("D-Bus JOIGNABLE"); s.destroy(); r(); });
+    s.on("error", e => { console.log("D-Bus refusé", e.code); r(); });
+  });
+};
 const port = p => new Promise(r => {
   const s = net.connect({ host: "127.0.0.1", port: p, timeout: 1500 });
   s.on("connect", () => { r(`${p} OUVERT`); s.destroy(); });
@@ -7,6 +22,7 @@ const port = p => new Promise(r => {
 });
 (async () => {
   for (const p of [5432, 8099, 3000, 8190]) console.log(await port(p));
+  await gestionnaire();
   await new Promise(r => require("http").get({ host: "169.254.42.42", path: "/conf", timeout: 2000 },
     x => { console.log("métadonnées 169.254.42.42 JOIGNABLES", x.statusCode); r(); })
     .on("error", e => { console.log("métadonnées bloquées", e.code); r(); })
