@@ -94,6 +94,13 @@ class PoseDeLaCle(Base):
         agent.ecrire_cle("bac", autre)
         self.assertEqual(agent.fichier_cle("bac").read_text(), f"ANTHROPIC_API_KEY={autre}\n")
 
+    def test_accepte_les_cles_personnelles_et_de_service_de_la_console(self):
+        for prefixe in ("sk-ant-usr-", "sk-ant-svc-"):
+            with self.subTest(prefixe=prefixe):
+                cle = prefixe + "A1b2_C3d4-" * 8
+                agent.ecrire_cle("bac", cle)
+                self.assertEqual(agent.fichier_cle("bac").read_text(), f"ANTHROPIC_API_KEY={cle}\n")
+
     def test_refuse_un_jeton_de_session_claude_ai(self):
         with self.assertRaises(agent.Erreur) as e:
             agent.ecrire_cle("bac", "sk-ant-oat01-" + "x" * 40)
@@ -102,7 +109,8 @@ class PoseDeLaCle(Base):
         self.assertFalse(agent.cle_presente("bac"))
 
     def test_refuse_ce_qui_n_est_pas_une_cle(self):
-        for mauvaise in ("", "abc", CLE + "\nFERME_TOKEN=vole", CLE + " x", "sk-ant-api"):
+        for mauvaise in ("", "abc", CLE + "\nFERME_TOKEN=vole", CLE + " x", "sk-ant-api",
+                         "sk-ant-usr", "sk-ant-adm01-" + "x" * 40):
             with self.subTest(mauvaise=mauvaise), self.assertRaises(agent.Erreur) as e:
                 agent.ecrire_cle("bac", mauvaise)
             self.assertEqual(e.exception.statut, 422)
