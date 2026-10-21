@@ -8,11 +8,14 @@ const gestionnaire = () => {
     const r = spawnSync("/usr/bin/systemctl", args, { encoding: "utf8", timeout: 10000 });
     console.log(r.status === 0 && r.stdout.trim() ? `${etiquette} LISIBLES` : `${etiquette} refusées`);
   }
-  return new Promise(r => {
-    const s = net.connect("/run/dbus/system_bus_socket");
-    s.on("connect", () => { console.log("D-Bus JOIGNABLE"); s.destroy(); r(); });
-    s.on("error", e => { console.log("D-Bus refusé", e.code); r(); });
+  const unix = (etiquette, chemin) => new Promise(r => {
+    const s = net.connect(chemin);
+    s.on("connect", () => { console.log(`${etiquette} JOIGNABLE`); s.destroy(); r(); });
+    s.on("error", e => { console.log(`${etiquette} refusé`, e.code); r(); });
   });
+  // Le journal n'est pas masqué : seul `RestrictAddressFamilies` le refuse (EAFNOSUPPORT).
+  return unix("D-Bus", "/run/dbus/system_bus_socket")
+    .then(() => unix("socket UNIX du journal", "/run/systemd/journal/stdout"));
 };
 const port = p => new Promise(r => {
   const s = net.connect({ host: "127.0.0.1", port: p, timeout: 1500 });
