@@ -87,6 +87,11 @@ BRIDES = [
     # Aucun texte d'un run ne passe plus en argv (`dans_le_sandbox`) ; /proc reste caché
     # entre sandboxes quand même.
     "ProtectProc=invisible", "ProcSubset=pid",
+    # Un run ne parle qu'en IP (Anthropic, le relais d'oto, le résolveur sur 127.0.0.53) :
+    # ni socket UNIX vers un service de la box, ni netlink. Les tubes et `socketpair`
+    # (stdio du relais MCP, sous-processus de node) ne sont pas concernés. Éprouvé avec
+    # le CLI 2.1.281 : banc de lecture complet, DNS et HTTPS, `auth login` (21/10/2026).
+    "RestrictAddressFamilies=AF_INET AF_INET6",
     "RuntimeMaxSec=1800",   # un run qui ne rend jamais la main ne tient pas le sandbox indéfiniment
 ]
 # La durée qu'un run peut DEMANDER (`max_seconds`, déclarée sur l'agent) : de 60 s à une

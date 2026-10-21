@@ -462,6 +462,7 @@ class DurcissementsDeLaBox(Base):
         self.assertIn("ProtectProc=invisible", agent.BRIDES)
         for chemin in ("-/run/dbus", "-/run/systemd/private"):
             self.assertIn(chemin, brides, "un sandbox ne parle jamais au gestionnaire")
+        self.assertIn("RestrictAddressFamilies=AF_INET AF_INET6", agent.BRIDES)
 
 
 if __name__ == "__main__":
