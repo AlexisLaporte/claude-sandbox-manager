@@ -322,13 +322,21 @@ def ecrire_cle(slug, cle):
     return etat(slug)
 
 
+def exige_texte(cle):
+    """Une clé est une chaîne : liste, nombre, null ou objet se refusent (422) sans être
+    répétés — ni lus comme « pas de clé », ce qui servirait en silence la clé posée."""
+    if not isinstance(cle, str):
+        raise Erreur(422, "clé d'API invalide : une chaîne est attendue")
+
+
 def ecrire_env(chemin, cle, workspace=None):
     """Un fichier d'environnement de `CLES` : la clé d'API (et le workspace), root 0600.
 
     Posé à côté puis renommé : un run en vol lit l'ancien ou le nouveau, jamais un
     fichier tronqué. La FORME de chaque valeur est vérifiée — c'est aussi ce qui garantit
     qu'une valeur ne peut pas porter une seconde ligne."""
-    cle = (cle or "").strip()
+    exige_texte(cle)
+    cle = cle.strip()
     if cle.startswith(JETON_SESSION):
         raise Erreur(422, "ceci est le jeton d'une session claude.ai, pas une clé d'API — "
                           "une session se connecte par /login")
@@ -358,6 +366,8 @@ def mode_auth(slug, demande, cle_du_run=None):
     refus n'aurait plus de statut HTTP pour se dire. `cle_du_run` : une clé remise avec
     CE run (elle ne vaut que pour lui) — elle exige `auth: "key"`, dite."""
     exige_sandbox(slug)
+    if cle_du_run is not None:   # absente = pas de clé du run ; présente = une chaîne
+        exige_texte(cle_du_run)
     if demande is None:
         if cle_du_run:
             raise Erreur(400, "une clé remise avec le run exige `auth: \"key\"`")

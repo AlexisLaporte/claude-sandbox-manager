@@ -118,6 +118,40 @@ class PoseDeLaCle(Base):
             self.assertEqual(e.exception.statut, 422)
         self.assertFalse(agent.cle_presente("bac"))
 
+    def test_une_cle_usr_ou_svc_ne_porte_pas_une_seconde_ligne(self):
+        for prefixe in ("sk-ant-usr-", "sk-ant-svc-"):
+            cle = prefixe + "A1b2_C3d4-" * 8
+            for mauvaise in (cle + "\nFERME_TOKEN=vole", cle + "\rX=1", cle + " x"):
+                with self.subTest(mauvaise=mauvaise), self.assertRaises(agent.Erreur) as e:
+                    agent.ecrire_cle("bac", mauvaise)
+                self.assertEqual(e.exception.statut, 422)
+        self.assertFalse(agent.cle_presente("bac"))
+
+    def test_aucun_autre_jeton_anthropic_ne_passe_pour_une_cle(self):
+        # Le préfixe nomme le type : un jeton de rafraîchissement OAuth, une clé d'admin ou
+        # une variante de casse ne deviennent pas une clé d'API servie en `x-api-key`.
+        for mauvaise in ("sk-ant-ort01-" + "x" * 40, "sk-ant-admin01-" + "x" * 40,
+                         "SK-ANT-USR-" + "x" * 40, "sk-ant-Usr-" + "x" * 40,
+                         "x-sk-ant-usr-" + "x" * 40, "sk-ant-usr-" + "x" * 5):
+            with self.subTest(mauvaise=mauvaise), self.assertRaises(agent.Erreur) as e:
+                agent.ecrire_cle("bac", mauvaise)
+            self.assertEqual(e.exception.statut, 422)
+        self.assertFalse(agent.cle_presente("bac"))
+
+    def test_un_jeton_de_session_reste_refuse_nommement_quel_qu_en_soit_le_suffixe(self):
+        # Un `sk-ant-oat…` qui aurait la forme d'une clé (`…usr…` dedans) reste un jeton de session.
+        with self.assertRaises(agent.Erreur) as e:
+            agent.ecrire_cle("bac", "sk-ant-oat01-usr-" + "A1b2_C3d4-" * 8)
+        self.assertIn("/login", str(e.exception))
+        self.assertFalse(agent.cle_presente("bac"))
+
+    def test_un_refus_ne_repete_jamais_la_cle(self):
+        for prefixe in ("sk-ant-api03-", "sk-ant-usr-", "sk-ant-svc-", "sk-ant-oat01-"):
+            secret = prefixe + "S3cr3t_" * 6
+            with self.subTest(prefixe=prefixe), self.assertRaises(agent.Erreur) as e:
+                agent.ecrire_cle("bac", secret + " x")
+            self.assertNotIn("S3cr3t", str(e.exception))
+
     def test_retirer_la_cle(self):
         agent.ecrire_cle("bac", CLE)
         self.assertFalse(agent.retirer_cle("bac")["apiKey"])
@@ -248,6 +282,16 @@ class CleRemiseAvecLeRun(Base):
         self.assertFalse(vu["config"].exists(), "la config du run doit être effacée à la fin")
         self.assertNotIn("erreur", sortie[-1])
         self.assertFalse(agent.cle_presente("bac"), "une clé du run n'est jamais stockée")
+
+    def test_une_cle_usr_du_run_part_en_x_api_key_et_le_cli_le_confirme(self):
+        # `ANTHROPIC_API_KEY` = l'en-tête `x-api-key` ; jamais `ANTHROPIC_AUTH_TOKEN` (Bearer).
+        usr = "sk-ant-usr-" + "A1b2_C3d4-" * 8
+        _, vu, sortie = self.lancer([init("ANTHROPIC_API_KEY"), RESULTAT], cle_du_run=usr)
+        self.assertEqual(vu["contenu"], f"ANTHROPIC_API_KEY={usr}\n")
+        self.assertFalse(any(usr in a for a in vu["args"]))
+        self.assertNotIn("erreur", sortie[-1])
+        _, _, sortie = self.lancer([init("none"), RESULTAT], cle_du_run=usr)
+        self.assertTrue(sortie[-1]["erreur"].startswith("auth_mismatch"))
 
     def test_la_cle_du_run_ne_passe_jamais_par_l_argv(self):
         r = agent.Run("bac", "key", cle_du_run=CLE)
@@ -445,6 +489,63 @@ class LiensDuSandbox(Base):
             chemin = agent.ecrire_config_mcp("bac", {"url": "u", "token": "t"})
         self.assertFalse(chemin.is_symlink())
         chemin.unlink()
+
+
+class CleQuiNEstPasUneChaine(Base):
+    """`api_key` hors chaîne : un 422 dit, sans trace ni écho de la valeur — et jamais lu
+    comme « pas de clé », ce qui servirait en silence la clé posée du sandbox."""
+
+    def requete(self, methode, chemin, corps):
+        import io
+        brut = json.dumps(corps).encode()
+        h = agent.Handler.__new__(agent.Handler)
+        h.path = chemin
+        h.headers = {"Authorization": "Bearer x", "Content-Length": str(len(brut)),
+                     "Accept": "application/x-ndjson"}
+        h.rfile = io.BytesIO(brut)
+        vu = {}
+        h._repondre = lambda statut, donnees, *a: vu.update(statut=statut, donnees=donnees)
+        with mock.patch.object(agent, "dans_le_sandbox") as sandbox:
+            h._router(methode)          # une exception ici = une trace, ce qu'on refuse
+        sandbox.assert_not_called()
+        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        return vu
+
+    def refuse_a_la_pose(self, valeur):
+        vu = self.requete("PUT", "/api/sandboxes/bac/key", {"api_key": valeur})
+        self.assertEqual(vu["statut"], 422)
+        self.assertEqual(vu["donnees"], {"erreur": "clé d'API invalide : une chaîne est attendue"})
+        self.assertFalse(agent.cle_presente("bac"))
+
+    def refuse_au_run(self, valeur):
+        agent.ecrire_cle("bac", CLE)    # une clé posée ne doit pas être servie à sa place
+        vu = self.requete("POST", "/api/sandboxes/bac/runs",
+                          {"prompt": "p", "auth": "key", "api_key": valeur})
+        self.assertEqual(vu["statut"], 422)
+        self.assertEqual(vu["donnees"], {"erreur": "clé d'API invalide : une chaîne est attendue"})
+
+    def test_liste(self):
+        self.refuse_a_la_pose([CLE])
+        self.refuse_au_run([CLE])
+        self.refuse_au_run([])
+
+    def test_nombre(self):
+        self.refuse_a_la_pose(123)
+        self.refuse_au_run(123)
+        self.refuse_au_run(0)
+
+    def test_objet(self):
+        self.refuse_a_la_pose({"cle": CLE})
+        self.refuse_au_run({"cle": CLE})
+        self.refuse_au_run({})
+
+    def test_null(self):
+        self.refuse_a_la_pose(None)
+        # Au run, null = clé absente (le worker d'abonnement n'en remet pas) : `auth: key`
+        # sans clé posée se refuse alors en 409, dit.
+        vu = self.requete("POST", "/api/sandboxes/bac/runs",
+                          {"prompt": "p", "auth": "key", "api_key": None})
+        self.assertEqual(vu["statut"], 409)
 
 
 class DurcissementsDeLaBox(Base):
