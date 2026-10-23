@@ -123,11 +123,10 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
 tient la même échéance sur le flux et ferme la connexion quand elle tombe — ce qui arrête
 déjà l'unité (le `finally` du flux) : la durée de l'unité est le filet, pas le geste.
 
-**Bornes d'un run** (tous les runs) : `max_turns` → `--max-turns` (défaut 200, borné à 1–1000) et
-`max_budget_usd` → `--max-budget-usd` (défaut 5 $, borné à 0,1–50 $), surchargeables par run comme
-`max_seconds`. 200 tours, c'est ce que tiennent les 1800 s des brides à ~9 s le tour : la durée reste la
-borne d'un run normal, les tours arrêtent une boucle rapide. 5 $ : de l'ordre d'un million de jetons
-d'entrée non cachés en Sonnet, large pour un run de procédure ; un agent qui tourne sur Opus le déclare.
+**Bornes d'un run** : aucune d'office. `max_turns` → `--max-turns` et `max_budget_usd` →
+`--max-budget-usd` ne sont passés au CLI que si le run les demande (déclarés sur l'agent, comme
+`max_seconds`), tels quels ; sinon seule la durée arrête le run. Une demande sans sens (pas un
+nombre, zéro ou moins) est refusée en 400 avant de réserver une place.
 Une borne atteinte finit le run en `error_max_turns` / `error_max_budget_usd`, que `ferme_resume.erreur`
 reprend. Les sous-agents tournent sur le modèle du run (`CLAUDE_CODE_SUBAGENT_MODEL=inherit` et
 `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` : le paramètre `model` de `Task` est retiré), jamais sur un modèle
