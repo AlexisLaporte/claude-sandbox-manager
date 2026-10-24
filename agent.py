@@ -98,16 +98,12 @@ BRIDES = [
 # heure, la borne d'oto-backend. Sans demande, les 1800 s des brides. Au-delà d'une
 # heure, c'est une question de capacité de la box, pas un réglage.
 DUREE_RUN_MIN_S, DUREE_RUN_MAX_S = 60, 3600
-# Les bornes d'un run en TOURS et en DOLLARS (`--max-turns`, `--max-budget-usd`) : sans
-# elles, seule la durée arrête un modèle qui boucle ou qui délègue sans fin à des
-# sous-agents — sur la voie par clé, c'est l'org qui paie. Un run peut en demander
-# d'autres (`max_turns`, `max_budget_usd`, déclarés sur l'agent comme `max_seconds`),
-# bornées ici. Défauts : 200 tours, c'est ce que tiennent les 1800 s des brides à ~9 s
-# le tour — la durée reste la borne d'un run normal, les tours arrêtent une boucle
-# rapide ; 5 $, c'est de l'ordre d'un million de jetons d'entrée non cachés en Sonnet,
-# large pour un run de procédure, et un agent qui tourne sur Opus le déclare.
-TOURS_RUN_DEFAUT, TOURS_RUN_MAX = 200, 1000
-BUDGET_RUN_DEFAUT_USD, BUDGET_RUN_MIN_USD, BUDGET_RUN_MAX_USD = 5.0, 0.1, 50.0
+# Les bornes d'un run en TOURS et en DOLLARS (`--max-turns`, `--max-budget-usd`) : la ferme
+# n'en pose AUCUNE d'office. Elles appartiennent à qui déclare l'agent (`max_turns`,
+# `max_budget_usd`, comme `max_seconds`) : déclarées, elles passent au CLI telles quelles ;
+# absentes, le run n'est arrêté que par sa durée. La ferme refuse seulement une demande
+# qui n'a pas de sens (pas un nombre, zéro ou moins).
+
 # Les sous-agents tournent sur le modèle du run, quoi que le modèle demande : sans ceci,
 # le paramètre `model` de `Task` (ou le modèle déclaré d'un agent intégré) choisit un
 # modèle plus cher que celui que l'agent a déclaré. `_FORCE` retire ce paramètre (relevé
@@ -218,21 +214,22 @@ def duree_du_run(demande):
 
 
 def tours_du_run(demande):
-    """`--max-turns` du run : les tours demandés, bornés — ou le défaut."""
+    """`--max-turns` du run : les tours demandés — ou aucun (None), sans défaut."""
     if demande is None:
-        return TOURS_RUN_DEFAUT
-    if isinstance(demande, bool) or not isinstance(demande, int):
-        raise Erreur(400, f"max_turns invalide : {demande!r} (un entier de tours)")
-    return max(1, min(demande, TOURS_RUN_MAX))
+        return None
+    if isinstance(demande, bool) or not isinstance(demande, int) or demande < 1:
+        raise Erreur(400, f"max_turns invalide : {demande!r} (un entier de tours, au moins 1)")
+    return demande
 
 
 def budget_du_run(demande):
-    """`--max-budget-usd` du run : le budget demandé, borné — ou le défaut."""
+    """`--max-budget-usd` du run : le budget demandé — ou aucun (None), sans défaut."""
     if demande is None:
-        return BUDGET_RUN_DEFAUT_USD
-    if isinstance(demande, bool) or not isinstance(demande, (int, float)) or demande != demande:
-        raise Erreur(400, f"max_budget_usd invalide : {demande!r} (un montant en dollars)")
-    return max(BUDGET_RUN_MIN_USD, min(float(demande), BUDGET_RUN_MAX_USD))
+        return None
+    if (isinstance(demande, bool) or not isinstance(demande, (int, float)) or demande != demande
+            or demande <= 0):
+        raise Erreur(400, f"max_budget_usd invalide : {demande!r} (un montant en dollars, positif)")
+    return float(demande)
 
 
 def description(slug):
@@ -717,7 +714,7 @@ def options_du_relais(maison, repertoire, session, config_mcp, consigne, config=
 
 
 def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, effort=None,
-                tours=TOURS_RUN_DEFAUT, budget=BUDGET_RUN_DEFAUT_USD):
+                tours=None, budget=None):
     """Les événements `stream-json` du CLI, un par un, puis `ferme_resume`.
 
     Avec `mcp` : les seuls outils du run sont ceux du relais, plus la délégation à un
@@ -729,7 +726,8 @@ def flux_du_run(slug, run, prompt, modele, system=None, mcp=None, duree=None, ef
         debut = time.time()
         # Le prompt passe sur stdin (`entree`), les autres textes par fichier : jamais en argv.
         args = ["-p", "--output-format", "stream-json", "--verbose", "--model", modele,
-                "--max-turns", str(tours), "--max-budget-usd", f"{budget:g}"]
+                *(["--max-turns", str(tours)] if tours is not None else []),
+                *(["--max-budget-usd", f"{budget:g}"] if budget is not None else [])]
         textes = {**({"systeme.txt": system} if system else {}),
                   **({"lecture.txt": CONSIGNE_LECTURE} if mcp is not None else {})}
         if textes:

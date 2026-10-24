@@ -58,10 +58,10 @@ class Bornes(Base):
                                                   "sonnet", **kw))
         return vu
 
-    def test_un_run_sans_demande_a_les_bornes_par_defaut(self):
+    def test_un_run_sans_demande_n_a_aucune_borne(self):
         args = self.lancer()["args"]
-        self.assertEqual(valeurs(args, "--max-turns"), [str(agent.TOURS_RUN_DEFAUT)])
-        self.assertEqual(valeurs(args, "--max-budget-usd"), ["5"])
+        self.assertNotIn("--max-turns", args)
+        self.assertNotIn("--max-budget-usd", args)
 
     def test_les_sous_agents_tournent_sur_le_modele_du_run(self):
         for mcp in (None, {"url": "u", "token": "t"}):
@@ -70,17 +70,16 @@ class Bornes(Base):
                 self.assertIn("CLAUDE_CODE_SUBAGENT_MODEL=inherit", variables)
                 self.assertIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1", variables)
 
-    def test_la_demande_est_bornee(self):
-        self.assertEqual(agent.tours_du_run(None), agent.TOURS_RUN_DEFAUT)
-        self.assertEqual(agent.tours_du_run(0), 1)
-        self.assertEqual(agent.tours_du_run(5000), agent.TOURS_RUN_MAX)
-        self.assertEqual(agent.budget_du_run(None), agent.BUDGET_RUN_DEFAUT_USD)
-        self.assertEqual(agent.budget_du_run(1000), agent.BUDGET_RUN_MAX_USD)
-        self.assertEqual(agent.budget_du_run(0), agent.BUDGET_RUN_MIN_USD)
+    def test_la_demande_passe_telle_quelle(self):
+        self.assertIsNone(agent.tours_du_run(None))
+        self.assertEqual(agent.tours_du_run(5000), 5000)
+        self.assertIsNone(agent.budget_du_run(None))
+        self.assertEqual(agent.budget_du_run(1000), 1000.0)
         self.assertEqual(agent.budget_du_run(12), 12.0)
         for f, mauvaise in ((agent.tours_du_run, "50"), (agent.tours_du_run, 2.5),
-                            (agent.tours_du_run, True), (agent.budget_du_run, "5"),
-                            (agent.budget_du_run, False), (agent.budget_du_run, float("nan"))):
+                            (agent.tours_du_run, True), (agent.tours_du_run, 0),
+                            (agent.budget_du_run, "5"), (agent.budget_du_run, False),
+                            (agent.budget_du_run, float("nan")), (agent.budget_du_run, 0)):
             with self.subTest(f=f.__name__, mauvaise=mauvaise), self.assertRaises(agent.Erreur) as e:
                 f(mauvaise)
             self.assertEqual(e.exception.statut, 400)
