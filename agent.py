@@ -112,6 +112,13 @@ MODELE_DES_SOUS_AGENTS = ("CLAUDE_CODE_SUBAGENT_MODEL=inherit", "CLAUDE_CODE_SUB
 # Les runs EN VOL sur toute la box, tous sandboxes confondus : au-delà, 429. Les brides
 # donnent 500 Mo à chaque run ; la box en tient ce nombre-là, pas un de plus.
 RUNS_MAX = int(os.environ.get("FERME_RUNS_MAX", "3"))
+# La FILE D'ATTENTE des places (`POST /api/places`) : un worker attend son tour ICI, dans
+# l'ordre d'arrivée, AVANT de prendre un travail, au lieu de prendre un travail puis
+# d'essuyer des 429. Il attend au plus `ATTENTE_MAX_S` par demande (puis redemande) ; la
+# place obtenue est à lui `PLACE_TENUE_S` : le temps de réserver son travail et de poster
+# le run qui la consomme (`place` dans le corps). Non consommée à temps (worker mort, aucun
+# travail à prendre sans `DELETE`), elle revient à la box.
+ATTENTE_MAX_S, PLACE_TENUE_S = 25, 30
 # Le workspace d'une clé d'ORGANISATION Anthropic : sans lui, toute requête faite avec
 # cette clé est refusée. Il part en en-tête (`ANTHROPIC_CUSTOM_HEADERS`) — une ligne, donc
 # une forme fermée, pour la même raison que la clé.
@@ -163,6 +170,8 @@ connexions = {}  # slug -> Popen de `claude auth login` en attente du code
 verrous = {}     # slug -> Lock : un run de SESSION à la fois par sandbox
 verrou_global = threading.Lock()
 places = threading.BoundedSemaphore(RUNS_MAX)   # runs en vol sur la box
+reservations = {}  # jeton -> échéance (monotone) : places tenues, pas encore consommées
+verrou_reservations = threading.Lock()
 
 
 class Erreur(Exception):
@@ -575,12 +584,14 @@ class Run:
       effacé à la fin : aucune copie ne reste sur la box.
     - une PLACE sur la box, quel que soit le mode (`RUNS_MAX`)."""
 
-    def __init__(self, slug, auth, cle_du_run=None, workspace=None):
+    def __init__(self, slug, auth, cle_du_run=None, workspace=None, place=None):
         self.slug, self.auth = slug, auth
         self.verrou = self.env = self.config = self.env_du_run = None
         self.libere = False
         self.ident = uuid.uuid4().hex[:12]
-        if not places.acquire(blocking=False):
+        # Une place réservée (`POST /api/places`) devient celle du run ; échue ou inconnue,
+        # le run en demande une comme s'il n'en avait pas apporté.
+        if not prendre_reservation(place) and not places.acquire(blocking=False):
             raise Erreur(429, f"la ferme tient déjà {RUNS_MAX} runs — réessaie plus tard")
         try:
             if auth == "session":
@@ -614,6 +625,59 @@ class Run:
             self.verrou.release()
             self.verrou = None
         places.release()
+
+
+def reserver_place(attente):
+    """Attend une place, dans l'ordre d'arrivée, au plus `attente` secondes (borné à
+    `ATTENTE_MAX_S`). `{place: jeton, tenue_s}` ; `{place: None}` si aucune ne s'est libérée :
+    le worker redemande, sans avoir pris de travail."""
+    try:
+        attente = float(attente if attente is not None else ATTENTE_MAX_S)
+    except (TypeError, ValueError):
+        raise Erreur(400, f"attente_s invalide : {attente!r}")
+    if not 0 <= attente <= ATTENTE_MAX_S:
+        raise Erreur(400, f"attente_s hors de 0–{ATTENTE_MAX_S} : {attente}")
+    if not places.acquire(timeout=attente):
+        return {"place": None}
+    jeton = uuid.uuid4().hex
+    with verrou_reservations:
+        reservations[jeton] = time.monotonic() + PLACE_TENUE_S
+    return {"place": jeton, "tenue_s": PLACE_TENUE_S}
+
+
+def prendre_reservation(jeton):
+    """Retire la réservation : vrai si elle tenait encore une place, qui passe à l'appelant.
+    Une seule des deux voies (le run, l'échéance) la retire : la place n'est rendue qu'une fois."""
+    if not isinstance(jeton, str) or not jeton:
+        return False
+    with verrou_reservations:
+        return reservations.pop(jeton, None) is not None
+
+
+def rendre_place(jeton):
+    """Le worker n'a pas eu de travail à prendre : la place revient à la box tout de suite."""
+    rendue = prendre_reservation(jeton)
+    if rendue:
+        places.release()
+    return {"rendue": rendue}
+
+
+def echoir_reservations(maintenant=None):
+    """Les places réservées et jamais consommées reviennent à la box."""
+    maintenant = time.monotonic() if maintenant is None else maintenant
+    with verrou_reservations:
+        echues = [j for j, fin in reservations.items() if fin <= maintenant]
+        for j in echues:
+            del reservations[j]
+    for _ in echues:
+        places.release()
+    return len(echues)
+
+
+def surveiller_reservations():
+    while True:
+        time.sleep(5)
+        echoir_reservations()
 
 
 def reserver(slug):
@@ -850,6 +914,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._repondre(200, PAGE.read_bytes(), "text/html; charset=utf-8")
         if self.headers.get("Authorization") != f"Bearer {JETON}":
             return self._repondre(401, {"erreur": "jeton manquant ou invalide"})
+        p = re.match(r"^/api/places(?:/([0-9a-f]{32}))?$", self.path)
+        if p:
+            return self._places(methode, p.group(1))
         m = re.match(r"^/api/sandboxes/([^/]+)(/login|/login/code|/key|/runs)?$", self.path)
         if not m:
             return self._repondre(404, {"erreur": "route inconnue"})
@@ -876,7 +943,30 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, ValueError) as e:
             self._repondre(400, {"erreur": f"requête invalide : {e}"})
 
+    def _places(self, methode, jeton):
+        if methode == "POST" and jeton is None:
+            action = lambda: reserver_place(self._corps().get("attente_s"))
+        elif methode == "DELETE" and jeton:
+            action = lambda: rendre_place(jeton)
+        else:
+            return self._repondre(405, {"erreur": "méthode non permise"})
+        try:
+            self._repondre(200, action())
+        except Erreur as e:
+            self._repondre(e.statut, {"erreur": str(e)})
+        except ValueError as e:
+            self._repondre(400, {"erreur": f"requête invalide : {e}"})
+
     def _run(self, slug, c):
+        try:
+            return self._run_sur_place(slug, c)
+        except BaseException:
+            # Refusé avant d'avoir pris la place réservée : elle revient à la box tout de
+            # suite, sans attendre son échéance. Prise par le run, il n'y a plus rien à rendre.
+            rendre_place(c.get("place"))
+            raise
+
+    def _run_sur_place(self, slug, c):
         # Tout ce qui se refuse se refuse AVANT de réserver : un refus ne réserve rien.
         # Le prompt compris : lu après `Run(...)`, son absence gardait une place et
         # laissait la clé du run sur le disque (trois requêtes bloquaient la box).
@@ -890,7 +980,8 @@ class Handler(BaseHTTPRequestHandler):
         effort = c.get("effort")
         if effort is not None and not EFFORT.fullmatch(str(effort)):
             raise Erreur(400, f"effort invalide : {effort!r}")
-        run = Run(slug, auth, cle_du_run=c.get("api_key"), workspace=c.get("workspace"))
+        run = Run(slug, auth, cle_du_run=c.get("api_key"), workspace=c.get("workspace"),
+                  place=c.get("place"))
         flux = flux_du_run(slug, run, prompt, c.get("model", "sonnet"),
                            system=c.get("system"), mcp=c.get("mcp"), duree=duree,
                            effort=effort, tours=tours, budget=budget)
@@ -955,4 +1046,5 @@ def nettoyer_restes():
 
 if __name__ == "__main__":
     nettoyer_restes()
+    threading.Thread(target=surveiller_reservations, daemon=True).start()
     ThreadingHTTPServer((HOTE, PORT), Handler).serve_forever()
