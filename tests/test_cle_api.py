@@ -184,7 +184,7 @@ class SourceConfirmeeParLeCli(Base):
         with mock.patch.object(agent, "dans_le_sandbox", return_value=FauxProcessus(evenements)) as sb, \
                 mock.patch.object(agent.subprocess, "run") as run:
             sortie = list(agent.flux_du_run("bac", r, "p", "sonnet"))
-        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place n'a pas été rendue")
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX, "la place n'a pas été rendue")
         return sortie, sb, run
 
     def test_run_par_cle_confirme(self):
@@ -332,17 +332,17 @@ class CleRemiseAvecLeRun(Base):
             for t in tenus:
                 t.liberer()
         agent.Run("bac", "key", cle_du_run=CLE).liberer()           # les places sont revenues
-        self.assertEqual(agent.places._value, agent.RUNS_MAX)
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX)
 
     def test_un_refus_a_la_reservation_ne_garde_rien(self):
         with self.assertRaises(agent.Erreur):
             agent.Run("bac", "key", cle_du_run="sk-ant-oat01-" + "x" * 40)
-        self.assertEqual(agent.places._value, agent.RUNS_MAX)
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX)
         self.assertEqual([p for p in agent.CLES.iterdir() if ".run-" in p.name], [])
         with self.assertRaises(agent.Erreur) as e:
             agent.Run("bac", "key", cle_du_run=CLE, workspace="a b")
         self.assertEqual(e.exception.statut, 422)
-        self.assertEqual(agent.places._value, agent.RUNS_MAX)
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX)
 
     def test_le_mode_de_la_cle_du_run(self):
         self.assertEqual(agent.mode_auth("bac", "key", CLE), "key")   # sans clé stockée
@@ -381,7 +381,7 @@ class RienNeFuit(Base):
                                return_value=FauxProcessus([init("ANTHROPIC_API_KEY"), RESULTAT])), \
                 mock.patch.object(agent.subprocess, "run"), self.assertRaises(BrokenPipeError):
             self._handler(casse)._run("bac", corps)
-        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX, "la place a fui")
         for d in (agent.CLES, agent.CLES_RUN):
             restes = [f for f in d.iterdir() if ".run-" in f.name] if d.is_dir() else []
             self.assertEqual(restes, [], f"la clé du run est restée sur le disque ({d})")
@@ -419,7 +419,7 @@ class CorpsIncomplet(Base):
                 self._handler()._run("bac", corps)
         self.assertEqual(e.exception.statut, 400)
         sandbox.assert_not_called()
-        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX, "la place a fui")
         for d in (agent.CLES, agent.CLES_RUN):
             restes = [f for f in d.iterdir() if ".run-" in f.name] if d.is_dir() else []
             self.assertEqual(restes, [], f"une clé de run est restée ({d})")
@@ -464,7 +464,7 @@ class LiensDuSandbox(Base):
         with self.assertRaises(agent.Erreur):
             agent.Run("bac", "key", cle_du_run=CLE)
         self.assertEqual(self.contenu_victime(), avant, "root a écrit à travers le lien")
-        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX, "la place a fui")
 
     def test_la_liberation_ne_suit_pas_un_lien_pose_pendant_le_run(self):
         r = agent.Run("bac", "key", cle_du_run=CLE)
@@ -508,7 +508,7 @@ class CleQuiNEstPasUneChaine(Base):
         with mock.patch.object(agent, "dans_le_sandbox") as sandbox:
             h._router(methode)          # une exception ici = une trace, ce qu'on refuse
         sandbox.assert_not_called()
-        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX, "la place a fui")
         return vu
 
     def refuse_a_la_pose(self, valeur):

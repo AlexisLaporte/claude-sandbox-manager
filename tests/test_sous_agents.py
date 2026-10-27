@@ -91,7 +91,7 @@ class Bornes(Base):
                 self.assertRaises(agent.Erreur):
             h._run("bac", {"prompt": "p", "max_budget_usd": "beaucoup"})
         sandbox.assert_not_called()
-        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX, "la place a fui")
 
     def test_la_demande_du_run_arrive_au_cli(self):
         h = agent.Handler.__new__(agent.Handler)

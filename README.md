@@ -46,8 +46,10 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 | PUT | `/api/sandboxes/{slug}/login/code` | transmet le code → état |
 | PUT | `/api/sandboxes/{slug}/key` | pose (ou remplace) une clé d'API `{api_key}` → état |
 | DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
-| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?, max_turns?, max_budget_usd?, place?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine (sans `place` réservée) |
-| POST | `/api/places` | `{attente_s?}` (0–25, défaut 25) : attend une place dans l'ordre d'arrivée → `{place, tenue_s}`, ou `{place: null}` si aucune ne s'est libérée |
+| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?, max_turns?, max_budget_usd?, place?, garder_place?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine (sans `place` réservée) |
+| GET | `/api/places` | état : `{max, libres, reservees: [{jeton8, qui, depuis_s, reste_s}], en_run}` (aucune donnée d'org) |
+| POST | `/api/places` | `{attente_s?, qui?}` (0–25, défaut 25 ; `qui` ≤ 64 caractères, journalisé) : attend une place dans l'ordre d'arrivée → `{place, tenue_s}`, ou `{place: null}` si aucune ne s'est libérée |
+| POST | `/api/places/{place}/prolonger` | la place reste au worker `tenue_s` de plus (plafond `PLACE_TENUE_MAX_S`, 600 s depuis l'octroi) → `{prolongee}` ; `false` = échue, rendue, inconnue ou plafond |
 | DELETE | `/api/places/{place}` | rend une place réservée et non consommée → `{rendue}` |
 
 `mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors que deux outils intégrés, la délégation à un
@@ -123,6 +125,14 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
   il la rend (`DELETE`) ; non consommée en `PLACE_TENUE_S` (30 s), elle revient seule à la
   box. Un run refusé rend sa place réservée. Une place échue ou inconnue : le run en demande
   une comme avant (429 si la box est pleine).
+- **Pré-run long** : le worker prolonge sa place (`…/prolonger`) pendant le claim, la session
+  MCP, la lecture du fil ; un worker mort cesse de prolonger et la place échoit à 30 s.
+- **Sonde du forfait** : son run porte `place` et `garder_place: true` ; à sa fin, la place
+  revient à SA réservation (même jeton, tenue de 30 s) pour le run du travail, au lieu de
+  revenir à la box. Sur une box pleine, la sonde ne bute plus sur un 429.
+- **Journal** : octroi, rendu, échéance (jetons tronqués à 8 caractères, `qui`). Le fil qui
+  fait échoir les places ne meurt pas sur une exception : elle est journalisée, le tour
+  suivant réessaie.
 - `effort` → `--effort` du CLI (`none`, valeur du catalogue d'oto pour un modèle qui ne
   raisonne pas, ne part pas).
 
