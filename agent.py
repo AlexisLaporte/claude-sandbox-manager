@@ -29,6 +29,7 @@ import pwd
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -591,7 +592,12 @@ class Run:
         self.ident = uuid.uuid4().hex[:12]
         # Une place réservée (`POST /api/places`) devient celle du run ; échue ou inconnue,
         # le run en demande une comme s'il n'en avait pas apporté.
-        if not prendre_reservation(place) and not places.acquire(blocking=False):
+        reservee = prendre_reservation(place)
+        if place and not reservee:
+            # Dit au journal : des 429 qui reviennent malgré la file se lisent ici.
+            print(f"place {str(place)[:8]} échue ou inconnue — le run en demande une",
+                  file=sys.stderr, flush=True)
+        if not reservee and not places.acquire(blocking=False):
             raise Erreur(429, f"la ferme tient déjà {RUNS_MAX} runs — réessaie plus tard")
         try:
             if auth == "session":
