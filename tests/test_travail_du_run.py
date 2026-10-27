@@ -92,7 +92,7 @@ class TravailDuRun(Base):
                              pendant=lambda vu: setattr(self, "courant", vu["run"]) or self.ranger(vu))
         self.assertEqual(ordre, [("effacer", vu["config"], False, True)])
         self.assertFalse(vu["repertoire"].exists())
-        self.assertEqual(agent.places._value, agent.RUNS_MAX)
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX)
 
     def test_par_session_les_resultats_ranges_sont_effaces_et_rien_d_autre(self):
         autre = agent.home("bac") / ".claude" / "projects" / "-un-autre-projet"
@@ -129,7 +129,7 @@ class TravailDuRun(Base):
         with self.assertRaises(agent.Erreur):
             self.lancer("session", "none")
         self.assertEqual(self.contenu_victime(), avant, "root a écrit à travers le lien")
-        self.assertEqual(agent.places._value, agent.RUNS_MAX, "la place a fui")
+        self.assertEqual(agent.places.libres(), agent.RUNS_MAX, "la place a fui")
 
     def test_l_effacement_ne_suit_pas_un_lien_pose_pendant_le_run(self):
         def poser(vu):

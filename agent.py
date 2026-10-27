@@ -22,8 +22,13 @@ REST, jeton Bearer, écoute sur FERME_HOST (jamais une interface publique) :
   DELETE /api/sandboxes/{slug}/key           retire la clé → état
   POST   /api/sandboxes/{slug}/runs          lance `claude -p`, un à la fois → résumé + événements,
                                         ou le flux NDJSON (`Accept: application/x-ndjson`)
+  GET    /api/places                         état des places : libres, réservées, en run
+  POST   /api/places                         attend une place → {place, tenue_s} | {place: null}
+  DELETE /api/places/{jeton}                 rend une place réservée non consommée
+  POST   /api/places/{jeton}/prolonger       repousse l'échéance d'une place réservée
 """
 import json
+import logging
 import os
 import pwd
 import re
@@ -120,6 +125,16 @@ RUNS_MAX = int(os.environ.get("FERME_RUNS_MAX", "3"))
 # le run qui la consomme (`place` dans le corps). Non consommée à temps (worker mort, aucun
 # travail à prendre sans `DELETE`), elle revient à la box.
 ATTENTE_MAX_S, PLACE_TENUE_S = 25, 30
+# Le PRÉ-RUN d'un worker (session MCP, ouverture du run, lecture d'un fil long, sonde du
+# forfait) peut dépasser `PLACE_TENUE_S` : le worker PROLONGE sa place tant qu'il vit
+# (`POST /api/places/{jeton}/prolonger`), et l'échéance courte reste celle d'un worker
+# mort. Prolongée ou non, une place réservée n'est jamais tenue plus de
+# `PLACE_TENUE_MAX_S` depuis son octroi : un pré-run qui ne finit pas la rend.
+PLACE_TENUE_MAX_S = 600
+# `qui` tient une place (`POST /api/places`) : un nom d'unité ou d'hôte, dit au journal et
+# par `GET /api/places`. Borné, réduit à des caractères sans surprise dans un journal.
+QUI_MAX = 64
+QUI_HORS_FORME = re.compile(r"[^A-Za-z0-9._:@/-]")
 # Le workspace d'une clé d'ORGANISATION Anthropic : sans lui, toute requête faite avec
 # cette clé est refusée. Il part en en-tête (`ANTHROPIC_CUSTOM_HEADERS`) — une ligne, donc
 # une forme fermée, pour la même raison que la clé.
@@ -170,8 +185,29 @@ ENVOYE = object()  # la réponse est déjà partie (flux)
 connexions = {}  # slug -> Popen de `claude auth login` en attente du code
 verrous = {}     # slug -> Lock : un run de SESSION à la fois par sandbox
 verrou_global = threading.Lock()
-places = threading.BoundedSemaphore(RUNS_MAX)   # runs en vol sur la box
-reservations = {}  # jeton -> échéance (monotone) : places tenues, pas encore consommées
+journal = logging.getLogger("ferme")
+
+
+class Places(threading.BoundedSemaphore):
+    """Les places de la box (runs en vol + places réservées), et leur compte lisible."""
+
+    def libres(self):
+        with self._cond:
+            return self._value
+
+
+class Reservation:
+    """Une place réservée : à qui, depuis quand, jusqu'à quand. `en_sonde` : un run qui
+    la garde (`garder_place`) la tient en ce moment — elle n'échoit pas, et revient à la
+    réservation à sa fin."""
+    __slots__ = ("qui", "octroi", "fin", "en_sonde")
+
+    def __init__(self, qui, maintenant):
+        self.qui, self.octroi, self.fin, self.en_sonde = qui, maintenant, maintenant + PLACE_TENUE_S, False
+
+
+places = Places(RUNS_MAX)   # runs en vol sur la box
+reservations = {}  # jeton -> Reservation : places tenues, pas encore consommées
 verrou_reservations = threading.Lock()
 
 
@@ -585,18 +621,20 @@ class Run:
       effacé à la fin : aucune copie ne reste sur la box.
     - une PLACE sur la box, quel que soit le mode (`RUNS_MAX`)."""
 
-    def __init__(self, slug, auth, cle_du_run=None, workspace=None, place=None):
+    def __init__(self, slug, auth, cle_du_run=None, workspace=None, place=None, garder=False):
         self.slug, self.auth = slug, auth
         self.verrou = self.env = self.config = self.env_du_run = None
         self.libere = False
         self.ident = uuid.uuid4().hex[:12]
         # Une place réservée (`POST /api/places`) devient celle du run ; échue ou inconnue,
-        # le run en demande une comme s'il n'en avait pas apporté.
-        reservee = prendre_reservation(place)
+        # le run en demande une comme s'il n'en avait pas apporté. `garder` (la sonde du
+        # forfait, avant le vrai run) : la place revient à SA réservation à la fin du run,
+        # pour le run du travail qui suit — au lieu de revenir à la box.
+        reservee = prendre_reservation(place, garder=bool(garder))
+        self.garde = place if reservee and garder else None
         if place and not reservee:
             # Dit au journal : des 429 qui reviennent malgré la file se lisent ici.
-            print(f"place {str(place)[:8]} échue ou inconnue — le run en demande une",
-                  file=sys.stderr, flush=True)
+            journal.warning("place %s échue ou inconnue — le run en demande une", str(place)[:8])
         if not reservee and not places.acquire(blocking=False):
             raise Erreur(429, f"la ferme tient déjà {RUNS_MAX} runs — réessaie plus tard")
         try:
@@ -630,10 +668,22 @@ class Run:
         if self.verrou is not None:
             self.verrou.release()
             self.verrou = None
-        places.release()
+        if self.garde is not None:
+            restaurer_reservation(self.garde)
+        else:
+            places.release()
 
 
-def reserver_place(attente):
+def qui_nettoye(qui):
+    """`qui` tient la place : facultatif, un texte court, sans caractère de contrôle."""
+    if qui is None:
+        return None
+    if not isinstance(qui, str):
+        raise Erreur(400, f"qui invalide : un texte, pas {type(qui).__name__}")
+    return QUI_HORS_FORME.sub("-", qui.strip())[:QUI_MAX] or None
+
+
+def reserver_place(attente, qui=None):
     """Attend une place, dans l'ordre d'arrivée, au plus `attente` secondes (borné à
     `ATTENTE_MAX_S`). `{place: jeton, tenue_s}` ; `{place: None}` si aucune ne s'est libérée :
     le worker redemande, sans avoir pris de travail."""
@@ -643,47 +693,129 @@ def reserver_place(attente):
         raise Erreur(400, f"attente_s invalide : {attente!r}")
     if not 0 <= attente <= ATTENTE_MAX_S:
         raise Erreur(400, f"attente_s hors de 0–{ATTENTE_MAX_S} : {attente}")
+    qui = qui_nettoye(qui)
     if not places.acquire(timeout=attente):
         return {"place": None}
     jeton = uuid.uuid4().hex
     with verrou_reservations:
-        reservations[jeton] = time.monotonic() + PLACE_TENUE_S
+        reservations[jeton] = Reservation(qui, time.monotonic())
+    journal.info("place %s octroyée à %s", jeton[:8], qui or "?")
     return {"place": jeton, "tenue_s": PLACE_TENUE_S}
 
 
-def prendre_reservation(jeton):
+def prendre_reservation(jeton, garder=False):
     """Retire la réservation : vrai si elle tenait encore une place, qui passe à l'appelant.
-    Une seule des deux voies (le run, l'échéance) la retire : la place n'est rendue qu'une fois."""
+    Une seule des voies (le run, le rendu, l'échéance) la retire : la place n'est rendue
+    qu'une fois. `garder` : la réservation reste, marquée tenue par le run (`en_sonde`),
+    jusqu'à `restaurer_reservation`. Une réservation déjà tenue ainsi ne se reprend pas."""
     if not isinstance(jeton, str) or not jeton:
         return False
     with verrou_reservations:
-        return reservations.pop(jeton, None) is not None
+        r = reservations.get(jeton)
+        if r is None or r.en_sonde:
+            return False
+        if garder:
+            r.en_sonde, r.fin = True, None
+        else:
+            del reservations[jeton]
+    return True
+
+
+def restaurer_reservation(jeton):
+    """Fin d'un run qui gardait sa place : elle redevient une réservation, tenue
+    `PLACE_TENUE_S` (et prolongeable) pour le run du travail."""
+    with verrou_reservations:
+        r = reservations.get(jeton)
+        if r is not None:
+            r.en_sonde, r.fin = False, time.monotonic() + PLACE_TENUE_S
+    if r is None:       # ne devrait pas arriver : la place revient à la box plutôt que de se perdre
+        journal.error("place %s gardée par un run mais sans réservation — rendue à la box",
+                      jeton[:8])
+        places.release()
+        return
+    journal.info("place %s de %s gardée après la sonde, pour le run du travail",
+                 jeton[:8], r.qui or "?")
 
 
 def rendre_place(jeton):
     """Le worker n'a pas eu de travail à prendre : la place revient à la box tout de suite."""
+    with verrou_reservations:
+        r = reservations.get(jeton) if isinstance(jeton, str) else None
     rendue = prendre_reservation(jeton)
     if rendue:
         places.release()
+        journal.info("place %s rendue par %s", jeton[:8], r.qui or "?")
     return {"rendue": rendue}
+
+
+def prolonger_place(jeton, maintenant=None):
+    """Le worker vit et prépare son run : sa place est à lui `PLACE_TENUE_S` de plus, dans
+    la limite de `PLACE_TENUE_MAX_S` depuis l'octroi. `prolongee: False` : la place n'est
+    plus à lui (échue, rendue, inconnue, ou plafond atteint) — son run en redemandera une.
+    Un jeton inconnu rend 200 (pas 404) : un 404 dit au worker « route inconnue »."""
+    maintenant = time.monotonic() if maintenant is None else maintenant
+    with verrou_reservations:
+        r = reservations.get(jeton)
+        if r is None:
+            return {"prolongee": False}
+        if r.en_sonde:
+            return {"prolongee": True, "tenue_s": PLACE_TENUE_S}
+        if maintenant - r.octroi >= PLACE_TENUE_MAX_S:
+            plafond = True
+        else:
+            plafond = False
+            r.fin = maintenant + PLACE_TENUE_S
+    if plafond:
+        journal.warning("place %s de %s tenue depuis %d s : plus prolongée, elle échoira",
+                        jeton[:8], r.qui or "?", PLACE_TENUE_MAX_S)
+        return {"prolongee": False}
+    return {"prolongee": True, "tenue_s": PLACE_TENUE_S}
 
 
 def echoir_reservations(maintenant=None):
     """Les places réservées et jamais consommées reviennent à la box."""
     maintenant = time.monotonic() if maintenant is None else maintenant
     with verrou_reservations:
-        echues = [j for j, fin in reservations.items() if fin <= maintenant]
-        for j in echues:
+        echues = [(j, r) for j, r in reservations.items()
+                  if not r.en_sonde and r.fin <= maintenant]
+        for j, _ in echues:
             del reservations[j]
     for _ in echues:
         places.release()
+    if echues:
+        journal.info("%d place(s) échue(s), rendue(s) à la box : %s", len(echues),
+                     ", ".join(f"{j[:8]} ({r.qui or '?'})" for j, r in echues))
     return len(echues)
 
 
-def surveiller_reservations():
-    while True:
-        time.sleep(5)
-        echoir_reservations()
+def etat_des_places(maintenant=None):
+    """`GET /api/places` : ce que la box tient. `en_run` compte les runs en vol (une
+    réservation gardée par une sonde en cours en est un). Aucune donnée d'org."""
+    maintenant = time.monotonic() if maintenant is None else maintenant
+    with verrou_reservations:
+        libres = places.libres()
+        tenues = [(j, r) for j, r in reservations.items() if not r.en_sonde]
+        reservees = [{"jeton8": j[:8], "qui": r.qui,
+                      "depuis_s": round(maintenant - r.octroi, 1),
+                      "reste_s": round(max(0.0, r.fin - maintenant), 1)} for j, r in tenues]
+    return {"max": RUNS_MAX, "libres": libres, "reservees": reservees,
+            "en_run": RUNS_MAX - libres - len(reservees)}
+
+
+def un_tour_de_surveillance():
+    """Un tour de `surveiller_reservations` : une exception est dite au journal, jamais
+    propagée — un fil mort ne rendrait plus aucune place échue, sans rien dire."""
+    try:
+        return echoir_reservations()
+    except Exception:  # noqa: BLE001 — le fil ne meurt pas ; le tour suivant réessaie
+        journal.exception("surveillance des places : tour en échec, le suivant réessaie")
+        return None
+
+
+def surveiller_reservations(periode=5, arret=None):
+    arret = threading.Event() if arret is None else arret
+    while not arret.wait(periode):
+        un_tour_de_surveillance()
 
 
 def reserver(slug):
@@ -920,9 +1052,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._repondre(200, PAGE.read_bytes(), "text/html; charset=utf-8")
         if self.headers.get("Authorization") != f"Bearer {JETON}":
             return self._repondre(401, {"erreur": "jeton manquant ou invalide"})
-        p = re.match(r"^/api/places(?:/([0-9a-f]{32}))?$", self.path)
+        p = re.match(r"^/api/places(?:/([0-9a-f]{32})(/prolonger)?)?$", self.path)
         if p:
-            return self._places(methode, p.group(1))
+            return self._places(methode, *p.groups())
         m = re.match(r"^/api/sandboxes/([^/]+)(/login|/login/code|/key|/runs)?$", self.path)
         if not m:
             return self._repondre(404, {"erreur": "route inconnue"})
@@ -949,10 +1081,14 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, ValueError) as e:
             self._repondre(400, {"erreur": f"requête invalide : {e}"})
 
-    def _places(self, methode, jeton):
-        if methode == "POST" and jeton is None:
-            action = lambda: reserver_place(self._corps().get("attente_s"))
-        elif methode == "DELETE" and jeton:
+    def _places(self, methode, jeton, sous=None):
+        if methode == "GET" and jeton is None:
+            action = etat_des_places
+        elif methode == "POST" and jeton is None:
+            action = lambda: reserver_place(*map(self._corps().get, ("attente_s", "qui")))
+        elif methode == "POST" and jeton and sous:
+            action = lambda: prolonger_place(jeton)
+        elif methode == "DELETE" and jeton and not sous:
             action = lambda: rendre_place(jeton)
         else:
             return self._repondre(405, {"erreur": "méthode non permise"})
@@ -987,7 +1123,7 @@ class Handler(BaseHTTPRequestHandler):
         if effort is not None and not EFFORT.fullmatch(str(effort)):
             raise Erreur(400, f"effort invalide : {effort!r}")
         run = Run(slug, auth, cle_du_run=c.get("api_key"), workspace=c.get("workspace"),
-                  place=c.get("place"))
+                  place=c.get("place"), garder=c.get("garder_place") is True)
         flux = flux_du_run(slug, run, prompt, c.get("model", "sonnet"),
                            system=c.get("system"), mcp=c.get("mcp"), duree=duree,
                            effort=effort, tours=tours, budget=budget)
@@ -1051,6 +1187,7 @@ def nettoyer_restes():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
     nettoyer_restes()
     threading.Thread(target=surveiller_reservations, daemon=True).start()
     ThreadingHTTPServer((HOTE, PORT), Handler).serve_forever()
