@@ -46,7 +46,9 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 | PUT | `/api/sandboxes/{slug}/login/code` | transmet le code → état |
 | PUT | `/api/sandboxes/{slug}/key` | pose (ou remplace) une clé d'API `{api_key}` → état |
 | DELETE | `/api/sandboxes/{slug}/key` | retire la clé → état |
-| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?, max_turns?, max_budget_usd?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine |
+| POST | `/api/sandboxes/{slug}/runs` | `{prompt, model, system?, mcp?, auth?, api_key?, workspace?, effort?, max_seconds?, max_turns?, max_budget_usd?, place?}` → résumé ; flux NDJSON avec `Accept: application/x-ndjson` ; 429 quand la box est pleine (sans `place` réservée) |
+| POST | `/api/places` | `{attente_s?}` (0–25, défaut 25) : attend une place dans l'ordre d'arrivée → `{place, tenue_s}`, ou `{place: null}` si aucune ne s'est libérée |
+| DELETE | `/api/places/{place}` | rend une place réservée et non consommée → `{rendue}` |
 
 `mcp` = `{url, token, org, project, run_id, tools}` : le run n'a alors que deux outils intégrés, la délégation à un
 **sous-agent** (`Task` : même processus, même unité, même clé, même relais) et `Read` borné (ci-dessous), et les outils du relais MCP
@@ -115,6 +117,12 @@ appelant qui ne la demande pas (le moteur `claude-subscription` d'oto-runner n'e
 - **Un corps de run incomplet** (sans `prompt`) est refusé en 400 **avant** toute réservation.
 - **Places de la box** : `FERME_RUNS_MAX` runs en vol (défaut 3), tous modes confondus ;
   au-delà, 429. Un refus avant réservation ne garde rien (place, fichier, dossier).
+- **File d'attente des places** : un worker réserve sa place (`POST /api/places`) AVANT de
+  prendre un travail, puis la remet avec son run (`place`). Il attend son tour sur la box,
+  dans l'ordre d'arrivée — jamais un travail pris puis refusé en 429. Sans travail à prendre,
+  il la rend (`DELETE`) ; non consommée en `PLACE_TENUE_S` (30 s), elle revient seule à la
+  box. Un run refusé rend sa place réservée. Une place échue ou inconnue : le run en demande
+  une comme avant (429 si la box est pleine).
 - `effort` → `--effort` du CLI (`none`, valeur du catalogue d'oto pour un modèle qui ne
   raisonne pas, ne part pas).
 
