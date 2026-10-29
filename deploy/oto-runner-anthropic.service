@@ -4,9 +4,10 @@
 # PARTAGÉE de l'instance — réglée tour par tour à son budget (`OTO_RUNNER_METERS_USAGE=1`).
 # Il ne détient AUCUNE clé de modèle (`OTO_RUNNER_ORG_KEYS_ONLY=1`, `ANTHROPIC_API_KEY` vide).
 #
-# Non-root, comme les deux autres : son secret `otow_` est PROPRE (profil `worker-anthropic`,
-# drop-in 20-secrets.conf) — révoquer celui de la ferme ou de l'abonnement ne le coupe pas,
-# et sa présence `anthropic` ne se confond pas avec la présence `anthropic#ferme`.
+# Utilisateur DYNAMIQUE, jamais `oto-runner` : sous le même uid que les workers de la ferme et
+# de l'abonnement, il lirait leur environnement (/proc/<pid>/environ), donc `OTO_FERME_TOKEN` et
+# leurs secrets machine. Son secret `otow_` est PROPRE (profil `worker-anthropic`, drop-in
+# 20-secrets.conf), lu par systemd avant le démarrage, comme son fichier d'env (root, 600).
 #
 # Arrêt gracieux : SIGTERM = ne plus réserver, finir, sortir. Un travail de la boucle tient
 # sous 15 min : même patience que les workers de la boucle de la plateforme (16 min).
@@ -17,14 +18,13 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-User=oto-runner
-Group=oto-runner
-EnvironmentFile=/etc/oto-runner/anthropic.env
+DynamicUser=yes
+EnvironmentFile=/etc/oto-runner-anthropic/anthropic.env
 # Les journaux de passage (`passages/`, relatif au répertoire courant) : un dossier
-# d'état à l'instance, seul endroit inscriptible sous ProtectSystem=strict.
+# d'état à l'instance, seul endroit inscriptible.
 StateDirectory=oto-runner-anthropic/%i
-WorkingDirectory=/var/lib/oto-runner-anthropic/%i
-Environment=OTO_RUNNER_QUI=%N
+WorkingDirectory=%S/oto-runner-anthropic/%i
+Environment=HOME=%S/oto-runner-anthropic/%i
 ExecStart=/srv/oto-runner/.venv/bin/python -m oto_runner.worker
 Restart=on-failure
 RestartSec=30
@@ -32,10 +32,27 @@ KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=16min
 SyslogIdentifier=oto-runner-anthropic-%i
+MemoryMax=512M
+# Durcissement : un client HTTP(S), rien d'autre.
+CapabilityBoundingSet=
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target
