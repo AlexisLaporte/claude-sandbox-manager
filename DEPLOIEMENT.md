@@ -44,12 +44,14 @@ sur une box à soi. Quatre pièces : **une box**, **l'agent des sandboxes** (ce 
      reçoit aussi (§4) ;
    - `oto-worker-secret-abonnement` : le secret machine du worker d'abonnement (§5) ;
    - `oto-worker-secret-ferme` : celui du worker `claude-farm` (§5 bis), si vous le posez — un secret
-     PROPRE, jamais celui de l'abonnement : révoquer l'un ne coupe pas l'autre.
+     PROPRE, jamais celui de l'abonnement : révoquer l'un ne coupe pas l'autre ;
+   - `oto-worker-secret-anthropic` : celui du worker de la boucle (§5 ter), si vous le posez, propre
+     lui aussi.
 2. Une **application IAM** en lecture seule sur ce seul projet (`SecretManagerReadOnly` +
    `SecretAccess`), et sa clé sur la box dans `/etc/ferme-secrets/scw-key` (600) :
    `SCW_ACCESS_KEY=…`, `SCW_SECRET_KEY=…`, `SCW_PROJECT_ID=…`, et `SCW_REGION=…` si ce n'est pas fr-par.
 3. `bash deploy/secrets.sh <hôte-ssh>` pose le chargeur et les drop-ins, puis tire les profils
-   (`agent`, `worker`, `worker-farm`) pour vérifier.
+   (`agent`, `worker`, `worker-farm`, et `worker-anthropic` si son unité est posée) pour vérifier.
 
 Tourner un secret = nouvelle version dans le Secret Manager, puis redémarrer le service. Copie de
 référence dans votre coffre (1Password…).
@@ -120,6 +122,38 @@ sont partagées avec l'abonnement.
 ⚠️ `OTO_RUNNER_ORGS` **restreint** ce worker, il ne détourne rien : les autres workers de la famille
 `anthropic` (ceux de la plateforme) servent toujours les mêmes orgs. Un travail va au premier qui le
 réserve.
+
+## 5 ter. Le worker `anthropic` (la boucle, sur la clé de l'org ou la clé partagée mesurée)
+
+Il sert la famille `anthropic` **sans sandbox** : la boucle maison d'oto-runner, la même que sur
+les workers de la plateforme. Il ne tient aucune clé de modèle (`OTO_RUNNER_ORG_KEYS_ONLY=1`,
+`ANTHROPIC_API_KEY` vide) et **promet la mesure** (`OTO_RUNNER_METERS_USAGE=1`) : il est donc le seul
+de la box à qui le backend peut servir la clé **partagée** de l'instance, réservée puis réglée tour par
+tour au budget de l'org. Les workers `claude-farm` ne la reçoivent jamais (`RAISON_FERME`), et un
+worker qui ne mesure pas rend ces travaux à la file.
+
+Ce qu'il prend (`db/runner_jobs._servi_par_ce_worker`, oto-backend) : toute la famille `anthropic`
+SAUF celle d'une org routée vers la ferme (option `claude_farm`). ⚠️ Une org qui a déposé sa clé et
+n'est PAS routée voit donc ses travaux partagés entre la ferme (Claude Code) et la boucle — le
+premier qui réserve gagne. Pour la garder en Claude Code, la router vers la ferme.
+
+1. Secret machine **propre** : `oto_admin_runner_worker op=create label="ferme anthropic (boucle)"` —
+   montré une fois ; le poser aussitôt dans le Secret Manager (`oto-worker-secret-anthropic`) et dans
+   le coffre.
+2. `bash deploy/secrets.sh <hôte-ssh>` (pose le profil `worker-anthropic` et son drop-in).
+3. `bash deploy/oto-runner.sh <hôte-ssh> <checkout d'oto-runner>` si le code a bougé.
+4. `bash deploy/worker-anthropic.sh <hôte-ssh> <url-du-backend> [<n°>]` : écrit
+   `/etc/oto-runner/anthropic.env` (modèle : `deploy/anthropic.env.exemple`), active et démarre
+   l'instance.
+
+Le journal doit dire `worker armé — … provider anthropic … clé SERVIE uniquement (anthropic) : celle de
+l'org, ou la clé partagée réglée à son budget — aucune clé d'environnement`, et la
+présence `anthropic` (sans `#ferme`) de ce worker apparaître dans `runner_platform_depots`. Toute autre
+formulation : `systemctl stop oto-runner-anthropic@<n°>`.
+
+Retour arrière : `systemctl disable --now oto-runner-anthropic@<n°>` (arrêt gracieux). Sans worker
+qui mesure, aucun travail ne tourne plus sur la clé partagée : ils retournent à la file, rien n'est
+perdu.
 
 ## 6. Ouvrir à des personnes
 

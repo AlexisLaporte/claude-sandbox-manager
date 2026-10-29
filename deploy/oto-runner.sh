@@ -17,5 +17,5 @@ id oto-runner >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/
 chown -R root:root /srv/oto-runner && chmod -R a+rX /srv/oto-runner
 /srv/oto-runner/.venv/bin/python -c "import oto_runner.relais_mcp, oto_runner.agent_abonnement; print('oto-runner posé')"
 # Un worker déjà lancé garde l'ancien code en mémoire : on le relance (arrêt gracieux, cf. l'unité).
-systemctl try-restart 'oto-runner-abonnement@*' 'oto-runner-farm@*' && echo "workers relancés"
+systemctl try-restart 'oto-runner-abonnement@*' 'oto-runner-farm@*' 'oto-runner-anthropic@*' && echo "workers relancés"
 DISTANT

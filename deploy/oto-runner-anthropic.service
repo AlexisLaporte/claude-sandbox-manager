@@ -1,0 +1,41 @@
+# Worker oto-runner `anthropic` (la boucle maison) — sur la box de la ferme, SANS sandbox.
+# Il sert les travaux de la famille `anthropic` que la ferme ne prend pas : ceux d'une org
+# NON routée vers la ferme, sur la clé que l'org a déposée ou, s'il en a l'accès, sur la clé
+# PARTAGÉE de l'instance — réglée tour par tour à son budget (`OTO_RUNNER_METERS_USAGE=1`).
+# Il ne détient AUCUNE clé de modèle (`OTO_RUNNER_ORG_KEYS_ONLY=1`, `ANTHROPIC_API_KEY` vide).
+#
+# Non-root, comme les deux autres : son secret `otow_` est PROPRE (profil `worker-anthropic`,
+# drop-in 20-secrets.conf) — révoquer celui de la ferme ou de l'abonnement ne le coupe pas,
+# et sa présence `anthropic` ne se confond pas avec la présence `anthropic#ferme`.
+#
+# Arrêt gracieux : SIGTERM = ne plus réserver, finir, sortir. Un travail de la boucle tient
+# sous 15 min : même patience que les workers de la boucle de la plateforme (16 min).
+[Unit]
+Description=oto-runner worker anthropic %i (boucle, clés d'org ou clé partagée mesurée)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=oto-runner
+Group=oto-runner
+EnvironmentFile=/etc/oto-runner/anthropic.env
+# Les journaux de passage (`passages/`, relatif au répertoire courant) : un dossier
+# d'état à l'instance, seul endroit inscriptible sous ProtectSystem=strict.
+StateDirectory=oto-runner-anthropic/%i
+WorkingDirectory=/var/lib/oto-runner-anthropic/%i
+Environment=OTO_RUNNER_QUI=%N
+ExecStart=/srv/oto-runner/.venv/bin/python -m oto_runner.worker
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=16min
+SyslogIdentifier=oto-runner-anthropic-%i
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
