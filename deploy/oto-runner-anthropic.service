@@ -47,6 +47,10 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Ce worker ne parle qu'au backend et au fournisseur, par Internet : ni l'agent de la ferme
+# (réseau privé des sandboxes) ni l'adresse des métadonnées du cloud. Les noms ne se filtrent
+# pas ici (IP seulement) : on ferme ce qu'il ne doit jamais atteindre.
+IPAddressDeny=10.0.0.0/24 169.254.0.0/16
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Pose et démarre le worker `anthropic` (la boucle) sur la box (après oto-runner.sh et secrets.sh).
-#   bash deploy/worker-anthropic.sh <hôte-ssh> <url-du-backend> [<n° d'instance, défaut 1>]
+#   bash deploy/worker-anthropic.sh <hôte-ssh> <url-du-backend> [<n° d'instance, défaut 1> [<orgs : 12,34>]]
 # Aucun secret ici : OTO_WORKER_SECRET vient du Secret Manager au démarrage (profil
 # `worker-anthropic`). /etc/oto-runner-anthropic/anthropic.env (root, 600) ne porte que le reste.
 set -euo pipefail
-HOTE_SSH=$1 BACKEND=${2%/} N=${3:-1}
+HOTE_SSH=$1 BACKEND=${2%/} N=${3:-1} ORGS=${4:-}
+# Ces deux valeurs sont écrites dans un fichier d'env et dans des commandes distantes : une
+# forme stricte, sinon un saut de ligne ajouterait des variables (ex. ANTHROPIC_API_KEY=…).
+[[ $BACKEND =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { echo "url du backend refusée : https://hôte[:port] attendu" >&2; exit 2; }
+[[ -z $ORGS || $ORGS =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "orgs refusées : des entiers séparés par des virgules" >&2; exit 2; }
+[[ $N =~ ^[0-9]{1,3}$ ]] || { echo "n° d'instance refusé : un entier attendu" >&2; exit 2; }
 cd "$(dirname "$0")"
 # Les vérifications D'ABORD : rien n'est posé sur une box qui ne pourrait pas le démarrer.
 ssh "$HOTE_SSH" bash -s <<'VERIF'
@@ -16,7 +21,7 @@ set -euo pipefail
 [ -x /srv/oto-runner/.venv/bin/python ] || { echo "oto-runner absent : deploy/oto-runner.sh" >&2; exit 1; }
 VERIF
 scp -q oto-runner-anthropic.service "$HOTE_SSH":/etc/systemd/system/oto-runner-anthropic@.service
-ssh "$HOTE_SSH" BACKEND="'$BACKEND'" N="'$N'" bash -s <<'DISTANT'
+ssh "$HOTE_SSH" BACKEND="'$BACKEND'" N="'$N'" ORGS="'$ORGS'" bash -s <<'DISTANT'
 set -euo pipefail
 : "${BACKEND:?}" "${N:?}"
 # Son propre dossier, root 700 : /etc/oto-runner appartient aux workers `oto-runner`.
@@ -33,6 +38,8 @@ OTO_BASE=$BACKEND
 OTO_MCP_URL=$BACKEND/mcp
 ANTHROPIC_API_KEY=
 FIN
+# Pour essayer sur une ou deux orgs d'abord : ce worker ne réserve que celles-là.
+[ -z "$ORGS" ] || echo "OTO_RUNNER_ORGS=$ORGS" >> /etc/oto-runner-anthropic/anthropic.env.neuf
 chown root:root /etc/oto-runner-anthropic/anthropic.env.neuf
 mv /etc/oto-runner-anthropic/anthropic.env.neuf /etc/oto-runner-anthropic/anthropic.env
 systemctl daemon-reload

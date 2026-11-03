@@ -125,6 +125,14 @@ réserve.
 
 ## 5 ter. Le worker `anthropic` (la boucle, sur la clé de l'org ou la clé partagée mesurée)
 
+⚠️ **Sécurité, avant la pose.** Ce worker reçoit la clé PARTAGÉE de la plateforme, servie par le
+backend à chaque réservation : quiconque tient la box et son secret `otow_` peut la réclamer. Sur
+cette box tournent aussi les sandboxes des orgs. À défaut d'une box sans sandbox client (oto-platform),
+poser dans cet ordre : (1) l'`enforce` de `messages:*` et le plancher de réservation actifs sur le
+backend (`OTO_CREDITS_MODE_FUNCTIONS`, `OTO_CREDITS_JOB_FLOOR`), à vérifier AVANT ; (2) le worker
+restreint à une org d'essai (4ᵉ argument de `worker-anthropic.sh`) ; (3) aucun octroi de la clé hors
+achat ; (4) une clé dédiée aux agents, dans son propre workspace Anthropic, si possible.
+
 Il sert la famille `anthropic` **sans sandbox** : la boucle maison d'oto-runner (`agent_llm`), la
 même que sur les workers de la plateforme. Il ne tient aucune clé de modèle
 (`OTO_RUNNER_ORG_KEYS_ONLY=1`, `ANTHROPIC_API_KEY` vide) et **promet la mesure**
