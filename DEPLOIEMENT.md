@@ -194,8 +194,12 @@ sa clé :
   clé partagée, servi au lieu d'être rendu à la file.
 
 Toute autre formulation (une clé d'environnement, un autre provider) : `systemctl stop
-oto-runner-anthropic@<n°>`. Mettre oto-runner à jour (`deploy/oto-runner.sh`) n'est PAS requis par
-ce worker : cela relance tous les workers de la box, avec la patience de la ferme (jusqu'à 61 min).
+oto-runner-anthropic@<n°>`. Ce worker exige le module `anthropic` dans `/srv/oto-runner/.venv`
+(extra `[anthropic]` d'oto-runner, posé par `deploy/oto-runner.sh`). À vérifier AVANT la première
+pose : `/srv/oto-runner/.venv/bin/python -I -c "import anthropic"`. S'il manque, repasser
+`deploy/oto-runner.sh` une fois, jamais un `pip install` à la main (le prochain passage du script
+l'ignorerait) ; cela relance tous les workers de la box, avec la patience de la ferme (jusqu'à
+61 min) : à placer hors des heures de travaux.
 
 Retour arrière : `systemctl disable --now oto-runner-anthropic@<n°>` (arrêt gracieux). Sans worker
 qui mesure, aucun travail ne tourne plus sur la clé partagée : ils retournent à la file, rien n'est
