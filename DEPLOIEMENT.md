@@ -133,6 +133,13 @@ backend (`OTO_CREDITS_MODE_FUNCTIONS`, `OTO_CREDITS_JOB_FLOOR`), à vérifier AV
 restreint à une org d'essai (4ᵉ argument de `worker-anthropic.sh`) ; (3) aucun octroi de la clé hors
 achat ; (4) une clé dédiée aux agents, dans son propre workspace Anthropic, si possible.
 
+⚠️ **La mesure repose sur la loyauté du worker.** C'est lui qui réserve chaque appel avant de
+l'envoyer et le règle après ; le backend ne voit pas l'appel lui-même. Qui est root sur la box peut
+extraire la clé partagée, ou appeler le modèle sans réserver. C'est accepté ici parce que le
+propriétaire de la box est aussi celui de la clé partagée. Si ce n'est plus le cas : une clé dédiée,
+dans son propre workspace Anthropic, avec un plafond de dépense, et un rapprochement régulier du
+relevé du fournisseur avec ce que le budget a réglé (`oto_admin_model_spend`).
+
 Il sert la famille `anthropic` **sans sandbox** : la boucle maison d'oto-runner (`agent_llm`), la
 même que sur les workers de la plateforme. Il ne tient aucune clé de modèle
 (`OTO_RUNNER_ORG_KEYS_ONLY=1`, `ANTHROPIC_API_KEY` vide) et **promet la mesure**
@@ -143,8 +150,21 @@ mesure pas rend ces travaux à la file.
 
 Il tourne sous un **utilisateur dynamique** (`DynamicUser=yes`), jamais `oto-runner` : sous le même
 uid, il lirait l'environnement des workers de la ferme et de l'abonnement (`/proc/<pid>/environ`),
-donc `OTO_FERME_TOKEN` et leurs secrets. Son env vit dans `/etc/oto-runner-anthropic/` (root 700).
-Il ne prend aucune place de la ferme.
+donc `OTO_FERME_TOKEN` et leurs secrets. Son env vit dans `/etc/oto-runner-anthropic/` (root 700),
+**un fichier par instance** (`anthropic-<n°>.env`) : poser une instance ne change jamais ce que sert
+une autre. Il ne prend aucune place de la ferme.
+
+Sortie réseau (unité, `IPAddressDeny` / `IPAddressAllow`) : la même liste que les brides des
+sandboxes. Ni localhost (sauf le résolveur 127.0.0.53/54), ni le réseau privé (10/8, 172.16/12,
+192.168/16, 100.64/10, fc00::/7), ni les métadonnées (169.254/16, fe80::/10 ; fd00:42::42 est
+dans fc00::/7), en IPv4 comme en IPv6. Le backend se joint donc par son adresse PUBLIQUE :
+`<url-du-backend>` doit se résoudre en une adresse publique sur la box.
+
+⚠️ **`OTO_RUNNER_ORGS` n'est pas une garde du serveur.** C'est un filtre que le worker déclare à
+chaque réservation (`org_ids`) ; son secret `otow_` n'est lié à aucune org, et un worker qui omet le
+filtre prend toutes les orgs. Il borne une erreur de pose, pas un abus. La frontière est ailleurs :
+l'octroi `platform_key:anthropic` (aux seules orgs qui ont acheté) et le mode `enforce` de
+`messages:*` sur le backend.
 
 Ce qu'il prend (`db/runner_jobs._servi_par_ce_worker`, oto-backend) : toute la famille `anthropic`
 SAUF celle d'une org routée vers la ferme (option `claude_farm`). ⚠️ Une org qui a déposé sa clé et
@@ -156,9 +176,13 @@ que pour une org À CLÉ PROPRE : sans clé, la ferme arrête ses travaux (`RAIS
    montré une fois ; le poser aussitôt dans le Secret Manager (`oto-worker-secret-anthropic`) et dans
    le coffre.
 2. `bash deploy/secrets.sh <hôte-ssh>` (pose le profil `worker-anthropic` et son drop-in).
-3. `bash deploy/worker-anthropic.sh <hôte-ssh> <url-du-backend> [<n°>]` : vérifie le drop-in, le
-   secret et oto-runner AVANT de rien poser, puis écrit `/etc/oto-runner-anthropic/anthropic.env`
-   (modèle : `deploy/anthropic.env.exemple`), active et démarre l'instance.
+3. `bash deploy/worker-anthropic.sh <hôte-ssh> <url-du-backend> <n°> <orgs>`, `<orgs>` OBLIGATOIRE :
+   les orgs d'essai (`12,34`), ou `toutes` explicitement. Il vérifie le drop-in, le secret et
+   oto-runner AVANT de rien poser, et refuse tant que l'ancien fichier commun
+   `/etc/oto-runner-anthropic/anthropic.env` existe (il ne le migre pas : le retirer à la main, puis
+   reposer chaque instance avec ses orgs). Il écrit ensuite `/etc/oto-runner-anthropic/anthropic-<n°>.env`
+   (modèle : `deploy/anthropic.env.exemple`), active et démarre l'instance, et attend 60 s au plus la
+   ligne de démarrage de CE démarrage.
 
 La ligne de démarrage doit dire `worker armé — … provider llm …` (le nom du module, `agent_llm`), et
 sa clé :
@@ -176,8 +200,8 @@ ce worker : cela relance tous les workers de la box, avec la patience de la ferm
 Retour arrière : `systemctl disable --now oto-runner-anthropic@<n°>` (arrêt gracieux). Sans worker
 qui mesure, aucun travail ne tourne plus sur la clé partagée : ils retournent à la file, rien n'est
 perdu. Ce qui reste sur la box est inerte : l'unité et son drop-in (`/etc/systemd/system/
-oto-runner-anthropic@.service*`), l'env (`/etc/oto-runner-anthropic/`, sans secret) et le dossier
-d'état. Le secret machine, lui, reste VALIDE : le révoquer sur l'instance (`oto_admin_runner_worker`)
+oto-runner-anthropic@.service*`), l'env (`/etc/oto-runner-anthropic/anthropic-<n°>.env`, sans
+secret) et le dossier d'état. Le secret machine, lui, reste VALIDE : le révoquer sur l'instance (`oto_admin_runner_worker`)
 si le worker ne doit pas revenir, puis supprimer sa version dans le Secret Manager.
 
 ## 6. Ouvrir à des personnes

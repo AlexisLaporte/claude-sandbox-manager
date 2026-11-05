@@ -19,7 +19,9 @@ Wants=network-online.target
 [Service]
 Type=exec
 DynamicUser=yes
-EnvironmentFile=/etc/oto-runner-anthropic/anthropic.env
+# Un fichier PAR INSTANCE : poser ou reposer une instance ne change jamais ce que sert une autre
+# (notamment `OTO_RUNNER_ORGS`).
+EnvironmentFile=/etc/oto-runner-anthropic/anthropic-%i.env
 # Les journaux de passage (`passages/`, relatif au répertoire courant) : un dossier
 # d'état à l'instance, seul endroit inscriptible.
 StateDirectory=oto-runner-anthropic/%i
@@ -47,10 +49,13 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-# Ce worker ne parle qu'au backend et au fournisseur, par Internet : ni l'agent de la ferme
-# (réseau privé des sandboxes) ni l'adresse des métadonnées du cloud. Les noms ne se filtrent
-# pas ici (IP seulement) : on ferme ce qu'il ne doit jamais atteindre.
-IPAddressDeny=10.0.0.0/24 169.254.0.0/16
+# Ce worker ne parle qu'au backend et au fournisseur, par Internet (adresses publiques) : ni
+# l'agent de la ferme ni rien du réseau privé, ni les métadonnées du cloud (169.254.42.42,
+# fd00:42::42), ni les services locaux de la box, en IPv4 comme en IPv6. Même liste que les
+# brides des sandboxes (agent.py, BRIDES). Les noms ne se filtrent pas ici (IP seulement).
+IPAddressDeny=127.0.0.0/8 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10
+# Le résolveur est systemd-resolved sur localhost : sans lui, pas de DNS.
+IPAddressAllow=127.0.0.53/32 127.0.0.54/32
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
