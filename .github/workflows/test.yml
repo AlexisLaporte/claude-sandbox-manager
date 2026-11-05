@@ -21,3 +21,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
       - name: Tests unitaires
         run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+  # Les scripts de pose et les unités systemd : ni box ni root. `bash -n` sur chaque script ;
+  # `systemd-analyze verify` sur chaque unité, l'interpréteur d'oto-runner (absent ici) remplacé
+  # par celui du système. verify ne sort pas en erreur sur une directive inconnue ou invalide :
+  # toute ligne qu'il écrit fait échouer l'étape.
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+      - name: Syntaxe des scripts
+        run: for f in deploy/*.sh deploy/box/*.sh; do bash -n "$f"; done
+      - name: Unités systemd
+        run: |
+          d=$(mktemp -d)
+          for u in deploy/oto-runner-*.service; do
+            sed 's#^ExecStart=/srv/oto-runner/.venv/bin/python #ExecStart=/usr/bin/python3 #' "$u" > "$d/$(basename "$u" .service)@ci.service"
+          done
+          cp deploy/ferme-agent.service "$d/"
+          out=$(systemd-analyze verify "$d"/*.service 2>&1) || { echo "$out"; exit 1; }
+          [ -z "$out" ] || { echo "$out"; exit 1; }
