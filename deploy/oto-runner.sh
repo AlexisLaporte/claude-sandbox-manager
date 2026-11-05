@@ -13,9 +13,11 @@ set -euo pipefail
 command -v python3 >/dev/null && dpkg -s python3-venv >/dev/null 2>&1 || apt-get install -y -qq python3-venv >/dev/null
 id oto-runner >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin oto-runner
 [ -x /srv/oto-runner/.venv/bin/python ] || python3 -m venv /srv/oto-runner/.venv
-/srv/oto-runner/.venv/bin/pip install -q --upgrade /srv/oto-runner/src
+# L'extra `anthropic` : le worker anthropic (la boucle) importe ce module ; sans lui il réserve des
+# travaux et les fait tous échouer au premier tour.
+/srv/oto-runner/.venv/bin/pip install -q --upgrade "/srv/oto-runner/src[anthropic]"
 chown -R root:root /srv/oto-runner && chmod -R a+rX /srv/oto-runner
-/srv/oto-runner/.venv/bin/python -c "import oto_runner.relais_mcp, oto_runner.agent_abonnement; print('oto-runner posé')"
+/srv/oto-runner/.venv/bin/python -c "import oto_runner.relais_mcp, oto_runner.agent_abonnement, anthropic; print('oto-runner posé')"
 # Un worker déjà lancé garde l'ancien code en mémoire : on le relance (arrêt gracieux, cf. l'unité).
-systemctl try-restart 'oto-runner-abonnement@*' 'oto-runner-farm@*' && echo "workers relancés"
+systemctl try-restart 'oto-runner-abonnement@*' 'oto-runner-farm@*' 'oto-runner-anthropic@*' && echo "workers relancés"
 DISTANT
