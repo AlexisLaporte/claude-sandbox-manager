@@ -244,6 +244,25 @@ ancien) : `systemctl stop oto-runner-openrouter@<n°>`.
 
 Retour arrière : `systemctl disable --now oto-runner-openrouter@<n°>`, comme au §5 ter.
 
+**Monter en charge.** Un processus sert UN travail à la fois, et un run d'agent dure de quelques
+minutes à 15 : le débit est le NOMBRE d'instances. En poser plusieurs (`worker-openrouter.sh … 1
+toutes`, `… 2 toutes`, …), chacune ~512 Mo au plus, et regarder la file : des travaux
+`openrouter` qui attendent plus d'un cycle de réservation veulent une instance de plus. Le
+modèle, lui, ne limite pas : OpenRouter ne plafonne pas le débit des modèles payants, et chaque
+modèle épingle plusieurs hôtes (le dernier est un secours de capacité) entre lesquels
+OpenRouter bascule seul.
+
+**Le solde prépayé est la vraie limite.** La clé partagée tire sur un solde OpenRouter : à zéro,
+TOUS les travaux sur clé partagée échouent ensemble (402, non rejoué). Avant d'ouvrir à des
+orgs : recharge automatique sur le compte OpenRouter, une limite de dépense sur la clé, et la
+clé dans la veille des soldes de plateforme. Le relevé de la clé : `GET
+https://openrouter.ai/api/v1/key` (`limit_remaining`).
+
+**Les prix bougent.** Les hôtes vivent dans le catalogue (oto-backend `runner_models`), les
+prix dans la grille du commerce, relevés à une date : un hôte qui change de prix change le
+coût sans changer la ligne. Les relire (`/api/v1/models/<id>/endpoints`) avant chaque
+ouverture, et à chaque changement de liste.
+
 ## 6. Ouvrir à des personnes
 
 Le chemin est fermé par défaut. Un admin l'ouvre compte par compte :
