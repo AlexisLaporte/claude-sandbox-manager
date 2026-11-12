@@ -236,9 +236,11 @@ venv (`requests` seul).
    et même attente que `worker-anthropic.sh` ; env dans
    `/etc/oto-runner-openrouter/openrouter-<n°>.env` (modèle : `deploy/openrouter.env.exemple`).
 
-La ligne de démarrage doit dire `worker armé — … provider llm …` avec le module
-`agent_llm_openai`, l'hôte `openrouter.ai` et `clé SERVIE uniquement (openrouter)`. Toute autre
-formulation : `systemctl stop oto-runner-openrouter@<n°>`.
+La ligne de démarrage doit dire `worker armé — … provider openai …` (le module
+`agent_llm_openai`) et `clé SERVIE uniquement (openrouter) : celle de l'org, ou la clé partagée
+réglée à son budget — aucune clé d'environnement` (oto-runner `worker._dire_la_cle`). Un dépôt
+autre qu'`openrouter` dans cette ligne veut dire que l'hôte n'est pas reconnu (oto-runner trop
+ancien) : `systemctl stop oto-runner-openrouter@<n°>`.
 
 Retour arrière : `systemctl disable --now oto-runner-openrouter@<n°>`, comme au §5 ter.
 

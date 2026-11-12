@@ -47,6 +47,7 @@ umask 077
 cat > "$ENV.neuf" <<FIN
 OTO_RUNNER_PROVIDER=openai
 OTO_RUNNER_OPENAI_BASE=https://openrouter.ai/api/v1
+OTO_RUNNER_MODEL=deepseek/deepseek-v4.1-flash-1017
 OTO_RUNNER_ORG_KEYS_ONLY=1
 OTO_RUNNER_METERS_USAGE=1
 OTO_RUNNER_ARMED=1
