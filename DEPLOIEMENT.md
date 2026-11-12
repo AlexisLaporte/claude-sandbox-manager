@@ -222,11 +222,15 @@ famille que le worker réserve : les modèles ouverts du catalogue (`runner_mode
 clé OpenRouter partagée : une clé DÉDIÉE aux agents, avec sa propre limite de dépense chez OpenRouter.
 
 Chaque tour épingle les hôtes que le catalogue déclare pour son modèle (`provider.only`) et refuse
-tout hôte qui garde ou réutilise les données (`data_collection: deny`) ; le prix réglé est celui du
-plus cher de ces hôtes.
+tout hôte qui garde ou réutilise les données (`data_collection: deny`). Sur la clé partagée,
+chaque tour est facturé à SON coût réel : OpenRouter rend avec chaque réponse ce qu'il a débité
+(`usage.cost`), le worker le rapporte au règlement et le backend l'écrit au journal — aucune grille
+au jeton.
 
-Prérequis : un backend qui connaît la famille `openrouter` (catalogue, dépôt de clé, règlement
-`openrouter.messages:<model>`) et un oto-runner qui reconnaît l'hôte. Aucun module de plus dans le
+Prérequis : un backend qui connaît la famille `openrouter` (catalogue, dépôt de clé, tour
+journalisé à son coût) et un oto-runner qui reconnaît l'hôte et rapporte le coût
+(`usage_cost_usd`) : un worker plus ancien voit chaque tour sur clé partagée refusé
+(`usage_unmeasured`). Aucun module de plus dans le
 venv (`requests` seul).
 
 1. Secret machine **propre** : `oto_admin_runner_worker op=create label="ferme openrouter (boucle)"`
@@ -258,10 +262,14 @@ orgs : recharge automatique sur le compte OpenRouter, une limite de dépense sur
 clé dans la veille des soldes de plateforme. Le relevé de la clé : `GET
 https://openrouter.ai/api/v1/key` (`limit_remaining`).
 
-**Les prix bougent.** Les hôtes vivent dans le catalogue (oto-backend `runner_models`), les
-prix dans la grille du commerce, relevés à une date : un hôte qui change de prix change le
-coût sans changer la ligne. Les relire (`/api/v1/models/<id>/endpoints`) avant chaque
-ouverture, et à chaque changement de liste.
+**Les prix bougent, la facture suit.** Le tour est facturé au coût qu'OpenRouter a rendu : un
+hôte qui change de prix ne demande aucune mise à jour. Seule l'estimation d'un run affichée
+dans l'app (`run-cost.ts`) suit un prix relevé à une date.
+
+**Le frein.** Rien n'est réservé avant un tour : quand le solde de crédits d'une org tombe à
+zéro, le commerce retire l'accès à la clé partagée, ce qui arrête la PROCHAINE réservation, pas
+le run en cours. Un run long peut donc dépasser le solde d'une org, de ce qu'il dépense jusqu'à
+sa fin.
 
 ## 6. Ouvrir à des personnes
 
