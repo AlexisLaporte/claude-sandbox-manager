@@ -47,6 +47,8 @@ sur une box à soi. Quatre pièces : **une box**, **l'agent des sandboxes** (ce 
      PROPRE, jamais celui de l'abonnement : révoquer l'un ne coupe pas l'autre ;
    - `oto-worker-secret-anthropic` : celui du worker de la boucle (§5 ter), si vous le posez, propre
      lui aussi.
+   - `oto-worker-secret-openrouter` : celui du worker des modèles ouverts (§5 quater), si vous le
+     posez, propre lui aussi.
 2. Une **application IAM** en lecture seule sur ce seul projet (`SecretManagerReadOnly` +
    `SecretAccess`), et sa clé sur la box dans `/etc/ferme-secrets/scw-key` (600) :
    `SCW_ACCESS_KEY=…`, `SCW_SECRET_KEY=…`, `SCW_PROJECT_ID=…`, et `SCW_REGION=…` si ce n'est pas fr-par.
@@ -207,6 +209,38 @@ perdu. Ce qui reste sur la box est inerte : l'unité et son drop-in (`/etc/syste
 oto-runner-anthropic@.service*`), l'env (`/etc/oto-runner-anthropic/anthropic-<n°>.env`, sans
 secret) et le dossier d'état. Le secret machine, lui, reste VALIDE : le révoquer sur l'instance (`oto_admin_runner_worker`)
 si le worker ne doit pas revenir, puis supprimer sa version dans le Secret Manager.
+
+## 5 quater. Le worker `openrouter` (la boucle, modèles ouverts via OpenRouter)
+
+Le même worker que §5 ter — boucle maison, sans sandbox, utilisateur dynamique, aucune clé à lui
+(`OTO_RUNNER_ORG_KEYS_ONLY=1`, `OTO_RUNNER_OPENAI_API_KEY` vide), mesure promise
+(`OTO_RUNNER_METERS_USAGE=1`), même sortie réseau — mais sur la voie Chat Completions
+(`OTO_RUNNER_PROVIDER=openai`) vers `OTO_RUNNER_OPENAI_BASE=https://openrouter.ai/api/v1`. C'est
+l'HÔTE qui nomme le dépôt de clé `openrouter` (oto-runner `agent_llm_openai._DEPOTS_PAR_HOTE`), donc la
+famille que le worker réserve : les modèles ouverts du catalogue (`runner_models`, famille
+`openrouter`). Les avertissements de sécurité et de loyauté du §5 ter valent à l'identique pour la
+clé OpenRouter partagée : une clé DÉDIÉE aux agents, avec sa propre limite de dépense chez OpenRouter.
+
+Chaque tour épingle les hôtes que le catalogue déclare pour son modèle (`provider.only`) et refuse
+tout hôte qui garde ou réutilise les données (`data_collection: deny`) ; le prix réglé est celui du
+plus cher de ces hôtes.
+
+Prérequis : un backend qui connaît la famille `openrouter` (catalogue, dépôt de clé, règlement
+`openrouter.messages:<model>`) et un oto-runner qui reconnaît l'hôte. Aucun module de plus dans le
+venv (`requests` seul).
+
+1. Secret machine **propre** : `oto_admin_runner_worker op=create label="ferme openrouter (boucle)"`
+   — montré une fois ; le poser aussitôt dans le Secret Manager (`oto-worker-secret-openrouter`).
+2. `bash deploy/secrets.sh <hôte-ssh>` (pose le profil `worker-openrouter` et son drop-in).
+3. `bash deploy/worker-openrouter.sh <hôte-ssh> <url-du-backend> <n°> <orgs>` — mêmes vérifications
+   et même attente que `worker-anthropic.sh` ; env dans
+   `/etc/oto-runner-openrouter/openrouter-<n°>.env` (modèle : `deploy/openrouter.env.exemple`).
+
+La ligne de démarrage doit dire `worker armé — … provider llm …` avec le module
+`agent_llm_openai`, l'hôte `openrouter.ai` et `clé SERVIE uniquement (openrouter)`. Toute autre
+formulation : `systemctl stop oto-runner-openrouter@<n°>`.
+
+Retour arrière : `systemctl disable --now oto-runner-openrouter@<n°>`, comme au §5 ter.
 
 ## 6. Ouvrir à des personnes
 

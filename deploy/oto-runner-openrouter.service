@@ -1,0 +1,67 @@
+# Worker oto-runner `openrouter` (la boucle maison, modèles ouverts via OpenRouter) — sur la box de la ferme, SANS sandbox.
+# Il sert les travaux de la famille `openrouter` (DeepSeek, GLM, MiniMax) : ceux d'une org
+# quelconque, sur la clé OpenRouter que l'org a déposée ou, s'il en a l'accès, sur la clé
+# PARTAGÉE de l'instance — réglée tour par tour à son budget (`OTO_RUNNER_METERS_USAGE=1`).
+# Il ne détient AUCUNE clé de modèle (`OTO_RUNNER_ORG_KEYS_ONLY=1`, `OTO_RUNNER_OPENAI_API_KEY` vide).
+#
+# Utilisateur DYNAMIQUE, jamais `oto-runner` : sous le même uid que les workers de la ferme et
+# de l'abonnement, il lirait leur environnement (/proc/<pid>/environ), donc `OTO_FERME_TOKEN` et
+# leurs secrets machine. Son secret `otow_` est PROPRE (profil `worker-openrouter`, drop-in
+# 20-secrets.conf), lu par systemd avant le démarrage, comme son fichier d'env (root, 600).
+#
+# Arrêt gracieux : SIGTERM = ne plus réserver, finir, sortir. Un travail de la boucle tient
+# sous 15 min : même patience que les workers de la boucle de la plateforme (16 min).
+[Unit]
+Description=oto-runner worker openrouter %i (boucle, modèles ouverts, clés d'org ou clé partagée mesurée)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+# Un fichier PAR INSTANCE : poser ou reposer une instance ne change jamais ce que sert une autre
+# (notamment `OTO_RUNNER_ORGS`).
+EnvironmentFile=/etc/oto-runner-openrouter/openrouter-%i.env
+# Les journaux de passage (`passages/`, relatif au répertoire courant) : un dossier
+# d'état à l'instance, seul endroit inscriptible.
+StateDirectory=oto-runner-openrouter/%i
+WorkingDirectory=%S/oto-runner-openrouter/%i
+Environment=HOME=%S/oto-runner-openrouter/%i
+ExecStart=/srv/oto-runner/.venv/bin/python -m oto_runner.worker
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=16min
+SyslogIdentifier=oto-runner-openrouter-%i
+MemoryMax=512M
+# Durcissement : un client HTTP(S), rien d'autre.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Ce worker ne parle qu'au backend et au fournisseur, par Internet (adresses publiques) : ni
+# l'agent de la ferme ni rien du réseau privé, ni les métadonnées du cloud (169.254.42.42,
+# fd00:42::42), ni les services locaux de la box, en IPv4 comme en IPv6. Même liste que les
+# brides des sandboxes (agent.py, BRIDES). Les noms ne se filtrent pas ici (IP seulement).
+IPAddressDeny=127.0.0.0/8 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10
+# Le résolveur est systemd-resolved sur localhost : sans lui, pas de DNS.
+IPAddressAllow=127.0.0.53/32 127.0.0.54/32
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
