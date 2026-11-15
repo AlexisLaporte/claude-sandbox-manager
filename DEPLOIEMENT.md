@@ -47,6 +47,8 @@ sur une box à soi. Quatre pièces : **une box**, **l'agent des sandboxes** (ce 
      PROPRE, jamais celui de l'abonnement : révoquer l'un ne coupe pas l'autre ;
    - `oto-worker-secret-anthropic` : celui du worker de la boucle (§5 ter), si vous le posez, propre
      lui aussi.
+   - `oto-worker-secret-openrouter` : celui du worker des modèles ouverts (§5 quater), si vous le
+     posez, propre lui aussi.
 2. Une **application IAM** en lecture seule sur ce seul projet (`SecretManagerReadOnly` +
    `SecretAccess`), et sa clé sur la box dans `/etc/ferme-secrets/scw-key` (600) :
    `SCW_ACCESS_KEY=…`, `SCW_SECRET_KEY=…`, `SCW_PROJECT_ID=…`, et `SCW_REGION=…` si ce n'est pas fr-par.
@@ -207,6 +209,67 @@ perdu. Ce qui reste sur la box est inerte : l'unité et son drop-in (`/etc/syste
 oto-runner-anthropic@.service*`), l'env (`/etc/oto-runner-anthropic/anthropic-<n°>.env`, sans
 secret) et le dossier d'état. Le secret machine, lui, reste VALIDE : le révoquer sur l'instance (`oto_admin_runner_worker`)
 si le worker ne doit pas revenir, puis supprimer sa version dans le Secret Manager.
+
+## 5 quater. Le worker `openrouter` (la boucle, modèles ouverts via OpenRouter)
+
+Le même worker que §5 ter — boucle maison, sans sandbox, utilisateur dynamique, aucune clé à lui
+(`OTO_RUNNER_ORG_KEYS_ONLY=1`, `OTO_RUNNER_OPENAI_API_KEY` vide), mesure promise
+(`OTO_RUNNER_METERS_USAGE=1`), même sortie réseau — mais sur la voie Chat Completions
+(`OTO_RUNNER_PROVIDER=openai`) vers `OTO_RUNNER_OPENAI_BASE=https://openrouter.ai/api/v1`. C'est
+l'HÔTE qui nomme le dépôt de clé `openrouter` (oto-runner `agent_llm_openai._DEPOTS_PAR_HOTE`), donc la
+famille que le worker réserve : les modèles ouverts du catalogue (`runner_models`, famille
+`openrouter`). Les avertissements de sécurité et de loyauté du §5 ter valent à l'identique pour la
+clé OpenRouter partagée : une clé DÉDIÉE aux agents, avec sa propre limite de dépense chez OpenRouter.
+
+Chaque tour épingle les hôtes que le catalogue déclare pour son modèle (`provider.only`) et refuse
+tout hôte qui garde ou réutilise les données (`data_collection: deny`). Sur la clé partagée,
+chaque tour est facturé à SON coût réel : OpenRouter rend avec chaque réponse ce qu'il a débité
+(`usage.cost`), le worker le rapporte au règlement et le backend l'écrit au journal — aucune grille
+au jeton.
+
+Prérequis : un backend qui connaît la famille `openrouter` (catalogue, dépôt de clé, tour
+journalisé à son coût) et un oto-runner qui reconnaît l'hôte et rapporte le coût
+(`usage_cost_usd`) : un worker plus ancien voit chaque tour sur clé partagée refusé
+(`usage_unmeasured`). Aucun module de plus dans le
+venv (`requests` seul).
+
+1. Secret machine **propre** : `oto_admin_runner_worker op=create label="ferme openrouter (boucle)"`
+   — montré une fois ; le poser aussitôt dans le Secret Manager (`oto-worker-secret-openrouter`).
+2. `bash deploy/secrets.sh <hôte-ssh>` (pose le profil `worker-openrouter` et son drop-in).
+3. `bash deploy/worker-openrouter.sh <hôte-ssh> <url-du-backend> <n°> <orgs>` — mêmes vérifications
+   et même attente que `worker-anthropic.sh` ; env dans
+   `/etc/oto-runner-openrouter/openrouter-<n°>.env` (modèle : `deploy/openrouter.env.exemple`).
+
+La ligne de démarrage doit dire `worker armé — … provider openai …` (le module
+`agent_llm_openai`) et `clé SERVIE uniquement (openrouter) : celle de l'org, ou la clé partagée
+réglée à son budget — aucune clé d'environnement` (oto-runner `worker._dire_la_cle`). Un dépôt
+autre qu'`openrouter` dans cette ligne veut dire que l'hôte n'est pas reconnu (oto-runner trop
+ancien) : `systemctl stop oto-runner-openrouter@<n°>`.
+
+Retour arrière : `systemctl disable --now oto-runner-openrouter@<n°>`, comme au §5 ter.
+
+**Monter en charge.** Un processus sert UN travail à la fois, et un run d'agent dure de quelques
+minutes à 15 : le débit est le NOMBRE d'instances. En poser plusieurs (`worker-openrouter.sh … 1
+toutes`, `… 2 toutes`, …), chacune ~512 Mo au plus, et regarder la file : des travaux
+`openrouter` qui attendent plus d'un cycle de réservation veulent une instance de plus. Le
+modèle, lui, ne limite pas : OpenRouter ne plafonne pas le débit des modèles payants, et chaque
+modèle épingle plusieurs hôtes (le dernier est un secours de capacité) entre lesquels
+OpenRouter bascule seul.
+
+**Le solde prépayé est la vraie limite.** La clé partagée tire sur un solde OpenRouter : à zéro,
+TOUS les travaux sur clé partagée échouent ensemble (402, non rejoué). Avant d'ouvrir à des
+orgs : recharge automatique sur le compte OpenRouter, une limite de dépense sur la clé, et la
+clé dans la veille des soldes de plateforme. Le relevé de la clé : `GET
+https://openrouter.ai/api/v1/key` (`limit_remaining`).
+
+**Les prix bougent, la facture suit.** Le tour est facturé au coût qu'OpenRouter a rendu : un
+hôte qui change de prix ne demande aucune mise à jour. Seule l'estimation d'un run affichée
+dans l'app (`run-cost.ts`) suit un prix relevé à une date.
+
+**Le frein.** Rien n'est réservé avant un tour : quand le solde de crédits d'une org tombe à
+zéro, le commerce retire l'accès à la clé partagée, ce qui arrête la PROCHAINE réservation, pas
+le run en cours. Un run long peut donc dépasser le solde d'une org, de ce qu'il dépense jusqu'à
+sa fin.
 
 ## 6. Ouvrir à des personnes
 
