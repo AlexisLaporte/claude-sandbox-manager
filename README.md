@@ -1,11 +1,11 @@
 # claude-sandbox-manager
 
 Faire tourner un agent sur **l'abonnement Claude personnel** de son propriétaire : un sandbox par personne,
-connecté par elle-même, lancé sans surveillance. Besoin porté par client (lot 1), contrat backend
+connecté par elle-même, lancé sans surveillance. Besoin porté par un client (lot 1), contrat backend
 dans `oto-backend#1043`.
 
-**Statut (24/09/2026) : en PROD, ouvert à trois personnes nommées** (Alexis, Julien, un collègue — option
-`claude_subscription`). Box `box-agents`, un worker `claude-subscription`. Premier run de bout en bout le 24/09
+**Statut (24/09/2026) : en PROD, ouvert à quelques personnes nommées** (option
+`claude_subscription`). Une box, un worker `claude-subscription`. Premier run de bout en bout le 24/09
 (travail 86093 : `oto_procedure` + `oto_whoami` sur l'abonnement, forfait remonté). Ouverture au-delà : après
 confirmation écrite d'Anthropic (voir « Ce qui manque »).
 
@@ -25,7 +25,7 @@ Les pièces : cet agent (sandboxes), `oto-runner` (moteur `claude-subscription`,
 ## Comment c'est fait
 
 - **Un sandbox = un utilisateur Unix** `sandbox-<slug>`, HOME `/srv/sandboxes/<slug>` (0700, racine 0711).
-  Pas de conteneur : box-client n'a ni Docker ni la place.
+  Pas de conteneur : la box n'a ni Docker ni la place.
 - **Chaque commande = une unité `systemd-run` éphémère bridée** (`BRIDES` dans `agent.py`) :
   500 Mo, 80 % CPU, système en lecture seule sauf son HOME, `/opt`, `/etc/ferme` et la base invisibles,
   localhost et réseaux privés interdits sauf le résolveur DNS (127.0.0.53/54).
@@ -172,14 +172,14 @@ Scripts : `deploy/box/box.sh` (pare-feu du réseau privé, socle, sonde), `deplo
 au démarrage dans le Secret Manager), `deploy/oto-runner.sh`, `deploy/installer.sh` (agent),
 `deploy/worker.sh` (worker `claude-subscription`).
 
-Notre instance : box `box-agents` (DEV1-S, IP privée `10.0.0.2`), backend `mcp.example.com`. Ce qui est propre
-à notre parc (IP, supervision, inventaire) vit dans `<dépôt-infra>`, `scripts/box-agents/`.
+Instance de référence : une box DEV1-S sur réseau privé, face à un backend oto. Ce qui est propre
+à un parc (IP, supervision, inventaire) vit hors de ce dépôt.
 
-## Feuille de route (décidée par Alexis, 25/09/2026)
+## Feuille de route (25/09/2026)
 
-Le service tournera **chez client, après la bascule** sur son Scaleway ; box-agents reste d'ici là notre banc de
-test (vous trois seulement). Les quatre évolutions sont livrées (25/09/2026) ; **client fait les tests**, et
-Julien et un collègue ont été prévenus du **risque de suspension** des comptes Claude (clients et eux-mêmes).
+Le service doit tourner **chez le client, après la bascule** sur son cloud ; la box actuelle reste d'ici là un banc de
+test. Les quatre évolutions sont livrées (25/09/2026) ; les testeurs ont été prévenus du **risque de suspension**
+des comptes Claude.
 
 1. ~~Secrets hors des scripts~~ : lus au démarrage dans le Secret Manager (`deploy/secrets.sh`).
 2. ~~Historique en direct~~ : chaque message du CLI apposé au fil du run (`run_messages`) à son arrivée (oto-runner#26).
